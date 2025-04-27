@@ -161,19 +161,38 @@ async function updateLeaderboard() {
     console.log('Updating leaderboard from blockchain...');
     
     // First check if we can get data from Edge Config
-    const edgeConfigData = await edgeConfig.getLeaderboardData();
-    if (edgeConfigData) {
-      console.log('Got leaderboard data from Edge Config, using as baseline');
-      leaderboardData = edgeConfigData;
-      // Don't set isConnectedToBlockchain here - we'll check actual connection below
+    try {
+      const edgeConfigData = await edgeConfig.getLeaderboardData();
+      if (edgeConfigData) {
+        console.log('Got leaderboard data from Edge Config, using as baseline');
+        leaderboardData = edgeConfigData;
+        // Don't set isConnectedToBlockchain here - we'll check actual connection below
+      }
+    } catch (edgeErr) {
+      console.error('Error fetching data from Edge Config:', edgeErr.message);
+      // Continue with execution, will try blockchain or use mock data
     }
     
     // If provider or contract not initialized, try to initialize them
     if (!provider || !contract) {
       console.log('Provider or contract not initialized, attempting to initialize...');
-      const providerInitialized = await initializeProvider();
-      if (providerInitialized) {
-        await initializeContract();
+      
+      // Use a timeout promise to prevent hanging
+      const initTimeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Provider initialization timed out after 15s')), 15000)
+      );
+      
+      try {
+        // Race against timeout
+        const providerInitPromise = initializeProvider();
+        const providerInitialized = await Promise.race([providerInitPromise, initTimeout]);
+        
+        if (providerInitialized) {
+          await initializeContract();
+        }
+      } catch (timeoutErr) {
+        console.error('Initialization timed out:', timeoutErr.message);
+        throw new Error('Failed to initialize provider or contract due to timeout');
       }
       
       if (!provider || !contract) {
@@ -539,17 +558,27 @@ async function updateLeaderboard() {
     isConnectedToBlockchain = false;
     
     // Try to get data from Edge Config as fallback
-    const edgeConfigData = await edgeConfig.getLeaderboardData();
-    if (edgeConfigData) {
-      console.log('Using Edge Config data as fallback');
-      leaderboardData = edgeConfigData;
-      // Mark as not connected but we still have data
-      isConnectedToBlockchain = false;
-    } else if (leaderboardData.leaderboard.length === 0) {
-      // If we don't have any data yet from Edge Config, use mock data
-      console.log('Using mock data as fallback');
-      leaderboardData.leaderboard = [...mockLeaderboard];
-      leaderboardData.lastUpdate = new Date().toISOString();
+    try {
+      const edgeConfigData = await edgeConfig.getLeaderboardData();
+      if (edgeConfigData) {
+        console.log('Using Edge Config data as fallback');
+        leaderboardData = edgeConfigData;
+        // Mark as not connected but we still have data
+        isConnectedToBlockchain = false;
+      } else if (leaderboardData.leaderboard.length === 0) {
+        // If we don't have any data yet from Edge Config, use mock data
+        console.log('Using mock data as fallback');
+        leaderboardData.leaderboard = [...mockLeaderboard];
+        leaderboardData.lastUpdate = new Date().toISOString();
+      }
+    } catch (fallbackErr) {
+      console.error('Error using Edge Config fallback:', fallbackErr.message);
+      // If all else fails, ensure we have mock data
+      if (leaderboardData.leaderboard.length === 0) {
+        console.log('Using mock data after all fallbacks failed');
+        leaderboardData.leaderboard = [...mockLeaderboard];
+        leaderboardData.lastUpdate = new Date().toISOString();
+      }
     }
   }
 }
@@ -591,8 +620,37 @@ app.get('/', (req, res) => {
   // Otherwise, the static middleware will serve index.html
 });
 
-app.get('/api/leaderboard', (req, res) => {
-  res.json(leaderboardData);
+app.get('/api/leaderboard', async (req, res) => {
+  // Add a safety mechanism to avoid hanging requests
+  const requestTimeout = setTimeout(() => {
+    console.log('Leaderboard request timed out, returning available data');
+    return res.json(leaderboardData);
+  }, 5000); // 5 second timeout
+  
+  try {
+    // If we don't have data yet and blockchain isn't connected, try to update
+    if (leaderboardData.leaderboard.length === 0 || !isConnectedToBlockchain) {
+      try {
+        // Use a timeout promise to make sure this doesn't hang
+        const updateTimeout = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Update timed out')), 4000)
+        );
+        
+        // Race the update against a timeout
+        await Promise.race([updateLeaderboard(), updateTimeout]);
+      } catch (updateErr) {
+        console.error('Update during request failed:', updateErr.message);
+        // Continue and return whatever data we have
+      }
+    }
+    
+    clearTimeout(requestTimeout);
+    res.json(leaderboardData);
+  } catch (error) {
+    console.error('Error handling leaderboard request:', error);
+    clearTimeout(requestTimeout);
+    res.json(leaderboardData); // Return what we have even on error
+  }
 });
 
 // Health check endpoint - modified to include Edge Config status
