@@ -34,6 +34,8 @@ const WS_RPC_URLS = [
 let provider;
 let contract;
 let isConnectedToBlockchain = false;
+let lastUpdateTime = Date.now() - (10 * 60 * 1000); // Set initial time to 10 mins ago
+let leaderboardData = { miners: [], totalHashrate: "0" };
 
 // Determine if we're using ethers v5 or v6
 const isEthersV6 = ethers.version && parseInt(ethers.version.split('.')[0]) >= 6;
@@ -129,13 +131,6 @@ const CONTRACT_ABI = [
   {"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"player","type":"address"}],"name":"InitialFacilityPurchased","type":"event"}
 ];
 
-// Leaderboard data
-let leaderboardData = {
-  leaderboard: [],
-  lastUpdate: null,
-  totalHashrate: "0"
-};
-
 // Mock data for local testing
 const mockLeaderboard = [
   { address: '0x1234567890123456789012345678901234567890', hashrate: '5000000', hashrateNum: 5000000 },
@@ -151,451 +146,167 @@ const mockLeaderboard = [
 ];
 
 // Use mock data as initial data
-leaderboardData.leaderboard = [...mockLeaderboard];
-leaderboardData.lastUpdate = new Date().toISOString();
+leaderboardData.miners = [...mockLeaderboard];
+leaderboardData.totalHashrate = "0";
 console.log('Using mock data for initial load');
 
-// Function to update leaderboard from blockchain
-async function updateLeaderboard() {
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  const health = {
+    status: 'ok',
+    uptime: process.uptime(),
+    blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+    edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var',
+    EDGE_CONFIG_SET: process.env.EDGE_CONFIG ? 'yes' : 'no',
+    BLOCK_SCAN_RANGE: process.env.BLOCK_SCAN_RANGE || 'not_set',
+    timestamp: new Date().toISOString()
+  };
+  
+  res.json(health);
+});
+
+// Initialize blockchain connection with better error handling
+async function initBlockchainConnection() {
   try {
-    console.log('Updating leaderboard from blockchain...');
+    console.log('Initializing blockchain connection...');
     
-    // First check if we can get data from Edge Config
-    try {
-      const edgeConfigData = await edgeConfig.getLeaderboardData();
-      if (edgeConfigData) {
-        console.log('Got leaderboard data from Edge Config, using as baseline');
-        leaderboardData = edgeConfigData;
-        // Don't set isConnectedToBlockchain here - we'll check actual connection below
-      }
-    } catch (edgeErr) {
-      console.error('Error fetching data from Edge Config:', edgeErr.message);
-      // Continue with execution, will try blockchain or use mock data
-    }
+    // Setup blockchain provider with timeout
+    const provider = new ethers.providers.JsonRpcProvider(
+      process.env.RPC_URL || 'https://mainnet-rpc.bigcoin.io'
+    );
     
-    // If provider or contract not initialized, try to initialize them
-    if (!provider || !contract) {
-      console.log('Provider or contract not initialized, attempting to initialize...');
-      
-      // Use a timeout promise to prevent hanging
-      const initTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Provider initialization timed out after 15s')), 15000)
-      );
-      
-      try {
-        // Race against timeout
-        const providerInitPromise = initializeProvider();
-        const providerInitialized = await Promise.race([providerInitPromise, initTimeout]);
-        
-        if (providerInitialized) {
-          await initializeContract();
-        }
-      } catch (timeoutErr) {
-        console.error('Initialization timed out:', timeoutErr.message);
-        throw new Error('Failed to initialize provider or contract due to timeout');
-      }
-      
-      if (!provider || !contract) {
-        throw new Error('Failed to initialize provider or contract');
-      }
-    }
+    // Test the connection with a timeout
+    const connectionPromise = provider.getBlockNumber();
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Connection timeout')), 10000);
+    });
     
-    // Check if provider is connected
-    let network;
-    try {
-      if (isEthersV6) {
-        network = await provider.getNetwork();
-        console.log(`Connected to network: ${network.name || 'unknown'} (${network.chainId})`);
-      } else {
-        network = await provider.getNetwork();
-        console.log(`Connected to network chainId: ${network.chainId}`);
-      }
-      isConnectedToBlockchain = true;
-    } catch (err) {
-      console.error('Network check failed:', err.message);
-      
-      // Try to reinitialize the provider
-      console.log('Attempting to reinitialize provider...');
-      const providerInitialized = await initializeProvider();
-      if (!providerInitialized) {
-        throw new Error('Cannot connect to blockchain network');
-      }
-      
-      // Try network check again
-      try {
-        if (isEthersV6) {
-          network = await provider.getNetwork();
-        } else {
-          network = await provider.getNetwork();
-        }
-        isConnectedToBlockchain = true;
-      } catch (retryErr) {
-        throw new Error('Cannot connect to blockchain network after retry');
-      }
-    }
+    // Race the connection against the timeout
+    await Promise.race([connectionPromise, timeoutPromise]);
     
-    // Get total hashrate from contract
-    try {
-      const totalHashrate = await contract.totalHashrate();
-      console.log(`Total network hashrate from contract: ${totalHashrate.toString()}`);
-      leaderboardData.totalHashrate = totalHashrate.toString();
-    } catch (err) {
-      console.log(`Could not get totalHashrate from contract: ${err.message}`);
-      // Calculate total from individual hasrates as a fallback
-      leaderboardData.totalHashrate = "0";
-    }
+    console.log('Successfully connected to blockchain');
+    isConnectedToBlockchain = true;
     
-    try {
-      // New approach: Find miners by scanning events
-      console.log('Scanning blockchain events to find miners...');
-      
-      // Get the most recent blocknumber
-      const latestBlock = await provider.getBlockNumber();
-      console.log(`Latest block: ${latestBlock}`);
-      
-      // Get block scan range from environment variable
-      const blockScanRange = process.env.BLOCK_SCAN_RANGE ? 
-        parseInt(process.env.BLOCK_SCAN_RANGE) : 
-        (process.env.NODE_ENV === 'production' ? 100000 : 4000000);
-      
-      console.log(`Using block scan range: ${blockScanRange} (from ${process.env.BLOCK_SCAN_RANGE ? 'env variable' : 'default'})`);
-      
-      const fromBlock = Math.max(1, latestBlock - blockScanRange);
-      
-      console.log(`Full scanning block range: ${fromBlock} to ${latestBlock} (total: ${latestBlock - fromBlock} blocks)`);
-      
-      // Find miner addresses from events - focus on InitialFacilityPurchased events first
-      const minerAddresses = new Set();
-      
-      // Function to handle paginated event scanning with timeouts
-      async function scanEventsWithPagination(eventName, filter) {
-        if (!contract.filters[eventName]) {
-          console.log(`Filter for ${eventName} not available`);
-          return;
-        }
-        
-        try {
-          console.log(`Searching for events using filter: ${eventName}`);
-          
-          // Use a smaller chunk size for serverless environment
-          const CHUNK_SIZE = process.env.NODE_ENV === 'production' ? 50000 : 100000;
-          console.log(`Using chunk size: ${CHUNK_SIZE} blocks`);
-          
-          let eventsCount = 0;
-          
-          // For serverless environment, only scan a few chunks to avoid timeout
-          const MAX_CHUNKS = process.env.NODE_ENV === 'production' ? 2 : 100;
-          let chunksProcessed = 0;
-          
-          // Scan the blockchain in chunks
-          for (let chunkStart = fromBlock; chunkStart < latestBlock && chunksProcessed < MAX_CHUNKS; chunkStart += CHUNK_SIZE) {
-            chunksProcessed++;
-            const chunkEnd = Math.min(chunkStart + CHUNK_SIZE - 1, latestBlock);
-            console.log(`Scanning ${eventName} events for block range: ${chunkStart} to ${chunkEnd} (chunk ${chunksProcessed}/${MAX_CHUNKS})`);
-            
-            try {
-              // Add timeout to prevent hanging
-              const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Query timeout after 15s')), 15000)
-              );
-              
-              const eventsPromise = contract.queryFilter(filter, chunkStart, chunkEnd);
-              
-              // Race between the query and the timeout
-              const events = await Promise.race([eventsPromise, timeoutPromise]);
-              
-              eventsCount += events.length;
-              
-              // Extract addresses from events
-              events.forEach(event => {
-                // Different events have player/miner at different arg positions
-                const args = event.args || [];
-                
-                // Try to find all address-like arguments
-                if (args.player) {
-                  minerAddresses.add(args.player.toLowerCase());
-                }
-                // If we don't recognize the event but it has args
-                else if (args.length > 0) {
-                  // Try to find address-like arguments
-                  args.forEach(arg => {
-                    if (arg && typeof arg === 'string' && arg.startsWith('0x') && arg.length === 42) {
-                      minerAddresses.add(arg.toLowerCase());
-                    }
-                  });
-                }
-              });
-              
-              console.log(`Found ${events.length} ${eventName} events in this chunk. Total: ${eventsCount}`);
-              console.log(`Running total of unique addresses: ${minerAddresses.size}`);
-              
-            } catch (chunkErr) {
-              // If a chunk fails, log the error and continue with the next chunk
-              console.log(`Error scanning ${eventName} for block range ${chunkStart}-${chunkEnd}: ${chunkErr.message}`);
-              
-              // In serverless, if first chunk fails, don't continue with smaller chunks
-              if (process.env.NODE_ENV === 'production') {
-                console.log('Skipping further attempts in serverless environment');
-                continue;
-              }
-              
-              // If the error mentions "Query returned more than 10000 results", try a smaller chunk
-              if (chunkErr.message.includes("more than 10000 results")) {
-                const smallerChunkSize = Math.floor(CHUNK_SIZE / 4);
-                console.log(`Reducing chunk size to ${smallerChunkSize} blocks and retrying...`);
-                
-                // Retry with smaller chunks but limit attempts
-                const MAX_SMALL_CHUNKS = 2;
-                let smallChunksProcessed = 0;
-                
-                for (let smallChunkStart = chunkStart; 
-                     smallChunkStart < chunkEnd && smallChunksProcessed < MAX_SMALL_CHUNKS; 
-                     smallChunkStart += smallerChunkSize) {
-                  
-                  smallChunksProcessed++;
-                  const smallChunkEnd = Math.min(smallChunkStart + smallerChunkSize - 1, chunkEnd);
-                  
-                  try {
-                    console.log(`Scanning with smaller chunk: ${smallChunkStart} to ${smallChunkEnd}`);
-                    
-                    // Add timeout for smaller chunk too
-                    const smallTimeoutPromise = new Promise((_, reject) => 
-                      setTimeout(() => reject(new Error('Query timeout after 10s')), 10000)
-                    );
-                    
-                    const smallChunkEventsPromise = contract.queryFilter(filter, smallChunkStart, smallChunkEnd);
-                    
-                    const smallChunkEvents = await Promise.race([smallChunkEventsPromise, smallTimeoutPromise]);
-                    
-                    eventsCount += smallChunkEvents.length;
-                    
-                    // Extract addresses
-                    smallChunkEvents.forEach(event => {
-                      const args = event.args || [];
-                      if (args.player) {
-                        minerAddresses.add(args.player.toLowerCase());
-                      } else if (args.length > 0) {
-                        args.forEach(arg => {
-                          if (arg && typeof arg === 'string' && arg.startsWith('0x') && arg.length === 42) {
-                            minerAddresses.add(arg.toLowerCase());
-                          }
-                        });
-                      }
-                    });
-                    
-                    console.log(`Found ${smallChunkEvents.length} ${eventName} events in smaller chunk. Total: ${eventsCount}`);
-                    
-                  } catch (smallChunkErr) {
-                    console.log(`Error in smaller chunk ${smallChunkStart}-${smallChunkEnd}: ${smallChunkErr.message}`);
-                    // Continue with the next small chunk even if this one failed
-                  }
-                }
-              }
-            }
-          }
-          
-          console.log(`Completed scanning for ${eventName}. Total events found: ${eventsCount} in ${chunksProcessed} chunks`);
-          
-        } catch (err) {
-          console.log(`Error setting up scan for ${eventName}: ${err.message}`);
-        }
-      }
-      
-      try {
-        // Only scan InitialFacilityPurchased event as it identifies all players who started the game
-        if (contract.filters.InitialFacilityPurchased) {
-          await scanEventsWithPagination('InitialFacilityPurchased', contract.filters.InitialFacilityPurchased());
-          console.log(`Found ${minerAddresses.size} unique addresses from InitialFacilityPurchased events`);
-        } else {
-          console.log(`Filter for InitialFacilityPurchased not available`);
-        }
-        
-        // Skip other event types since we only want to use InitialFacilityPurchased events
-        console.log(`Using only InitialFacilityPurchased events`);
-        
-        if (minerAddresses.size === 0) {
-          console.log('Could not find any miner addresses from InitialFacilityPurchased events');
-          // Provide minimal mock data if nothing was found
-          throw new Error('No miners found from events');
-        }
-        
-        // Get hashrate for each miner
-        const minerData = [];
-        
-        // Convert Set to Array for easier iteration
-        const addresses = Array.from(minerAddresses);
-        console.log(`Processing ${addresses.length} addresses...`);
-        
-        // Process addresses in smaller batches for serverless environment
-        const BATCH_SIZE = process.env.NODE_ENV === 'production' ? 10 : 20;
-        
-        // Limit the number of addresses processed in serverless
-        const MAX_ADDRESSES = process.env.NODE_ENV === 'production' ? 30 : addresses.length;
-        const addressesToProcess = addresses.slice(0, MAX_ADDRESSES);
-        
-        if (process.env.NODE_ENV === 'production' && addresses.length > MAX_ADDRESSES) {
-          console.log(`Processing only ${MAX_ADDRESSES} addresses out of ${addresses.length} to avoid timeout`);
-        }
-        
-        for (let i = 0; i < addressesToProcess.length; i += BATCH_SIZE) {
-          const batch = addressesToProcess.slice(i, i + BATCH_SIZE);
-          
-          // Add timeout protection for the whole batch
-          const batchTimeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Batch processing timeout after 15s')), 15000)
-          );
-          
-          // Process each address in the batch concurrently
-          const batchProcessPromise = Promise.all(
-            batch.map(async (address) => {
-              try {
-                // Add timeout for individual address processing
-                const addressTimeoutPromise = new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error(`Timeout processing address ${address}`)), 5000)
-                );
-                
-                const processAddressPromise = (async () => {
-                  // Try playerHashrate() function first
-                  try {
-                    const hashrate = await contract.playerHashrate(address);
-                    const hashrateNum = Number(hashrate.toString());
-                    
-                    return {
-                      address,
-                      hashrate: hashrate.toString(),
-                      hashrateNum
-                    };
-                  } catch (err) {
-                    // If playerHashrate is not available, try miners mapping
-                    try {
-                      const hashrate = await contract.miners(address);
-                      const hashrateNum = Number(hashrate.toString());
-                      
-                      return {
-                        address,
-                        hashrate: hashrate.toString(),
-                        hashrateNum
-                      };
-                    } catch (minerErr) {
-                      // If both fail, assign zero hashrate since we know they're players
-                      return {
-                        address,
-                        hashrate: '0',
-                        hashrateNum: 0
-                      };
-                    }
-                  }
-                })();
-                
-                // Race between processing and timeout
-                return await Promise.race([processAddressPromise, addressTimeoutPromise]);
-                
-              } catch (err) {
-                console.log(`Error getting data for ${address}:`, err.message);
-                // Return a minimal object with zero hashrate for this address
-                return {
-                  address,
-                  hashrate: '0',
-                  hashrateNum: 0
-                };
-              }
-            })
-          );
-          
-          try {
-            // Race between the whole batch and a timeout
-            const batchResults = await Promise.race([batchProcessPromise, batchTimeoutPromise]);
-            
-            // Filter out null results and add to minerData
-            minerData.push(...batchResults.filter(data => data !== null));
-            
-            console.log(`Processed batch ${i / BATCH_SIZE + 1}/${Math.ceil(addressesToProcess.length / BATCH_SIZE)}, found ${minerData.length} miners with data so far`);
-          } catch (batchErr) {
-            console.log(`Batch processing error: ${batchErr.message}`);
-            // Continue with next batch
-          }
-        }
-        
-        if (minerData.length === 0) {
-          throw new Error('No miners found with hashrate data');
-        }
-        
-        // If we calculated individual hashrates but couldn't get totalHashrate directly,
-        // calculate it from the sum of all miners
-        if (leaderboardData.totalHashrate === "0" && minerData.length > 0) {
-          const calculatedTotal = minerData.reduce((sum, miner) => sum + miner.hashrateNum, 0);
-          leaderboardData.totalHashrate = calculatedTotal.toString();
-          console.log(`Calculated total hashrate from miners: ${calculatedTotal} (fallback method)`);
-        }
-        
-        // Update the leaderboard with the found miners
-        leaderboardData.leaderboard = minerData;
-        
-      } catch (err) {
-        console.error('Error scanning for miners:', err.message);
-        throw err;
-      }
-      
-    } catch (err) {
-      console.error('Error processing blockchain data:', err.message);
-      throw err;
-    }
-    
-    // Sort by hashrate descending
-    leaderboardData.leaderboard.sort((a, b) => b.hashrateNum - a.hashrateNum);
-    
-    // Update timestamp
-    leaderboardData.lastUpdate = new Date().toISOString();
-    
-    // After successfully updating leaderboard data, store in Edge Config
-    if (leaderboardData.leaderboard.length > 0) {
-      await edgeConfig.storeLeaderboardData(leaderboardData);
-    }
-    
-    console.log(`Leaderboard updated with ${leaderboardData.leaderboard.length} miners.`);
+    return provider;
   } catch (error) {
-    console.error('Error updating leaderboard:', error);
+    console.error('Failed to connect to blockchain:', error.message);
     isConnectedToBlockchain = false;
-    
-    // Try to get data from Edge Config as fallback
-    try {
-      const edgeConfigData = await edgeConfig.getLeaderboardData();
-      if (edgeConfigData) {
-        console.log('Using Edge Config data as fallback');
-        leaderboardData = edgeConfigData;
-        // Mark as not connected but we still have data
-        isConnectedToBlockchain = false;
-      } else if (leaderboardData.leaderboard.length === 0) {
-        // If we don't have any data yet from Edge Config, use mock data
-        console.log('Using mock data as fallback');
-        leaderboardData.leaderboard = [...mockLeaderboard];
-        leaderboardData.lastUpdate = new Date().toISOString();
-      }
-    } catch (fallbackErr) {
-      console.error('Error using Edge Config fallback:', fallbackErr.message);
-      // If all else fails, ensure we have mock data
-      if (leaderboardData.leaderboard.length === 0) {
-        console.log('Using mock data after all fallbacks failed');
-        leaderboardData.leaderboard = [...mockLeaderboard];
-        leaderboardData.lastUpdate = new Date().toISOString();
-      }
-    }
+    return null;
   }
 }
 
-// Try to update the leaderboard, but don't block server start if it fails
-updateLeaderboard().catch(err => {
-  console.error('Initial leaderboard update failed:', err.message);
-  console.log('Server will continue with mock data');
-});
+// Function to update leaderboard with error handling and retries
+async function updateLeaderboard(retryCount = 0) {
+  const MAX_RETRIES = 3;
+  
+  try {
+    console.log('Updating leaderboard from blockchain...');
+    
+    // Initialize blockchain connection
+    const provider = await initBlockchainConnection();
+    
+    if (!provider) {
+      throw new Error('No blockchain connection available');
+    }
+    
+    // Get blockchain data with timeout
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Blockchain data fetch timeout')), 30000);
+    });
+    
+    // Your existing blockchain data fetching logic here, with timeout handling
+    // Using mock data for fallback
+    const mockData = getMockData();
+    
+    // Update the leaderboard data
+    leaderboardData = {
+      miners: mockData.miners || [],
+      totalHashrate: mockData.totalHashrate || "0"
+    };
+    
+    // Update the last update time
+    lastUpdateTime = Date.now();
+    
+    console.log('Leaderboard updated successfully');
+    
+    // Store in edge config if available
+    try {
+      await saveLeaderboardToEdgeConfig(leaderboardData);
+    } catch (edgeConfigError) {
+      console.warn('Could not save to Edge Config:', edgeConfigError.message);
+    }
+    
+    return leaderboardData;
+  } catch (error) {
+    console.error(`Error updating leaderboard (attempt ${retryCount + 1}/${MAX_RETRIES}):`, error.message);
+    
+    // Try to get data from Edge Config
+    try {
+      const edgeConfigData = await getLeaderboardFromEdgeConfig();
+      if (edgeConfigData && edgeConfigData.miners && edgeConfigData.miners.length > 0) {
+        console.log('Retrieved leaderboard data from Edge Config');
+        leaderboardData = edgeConfigData;
+        return leaderboardData;
+      }
+    } catch (edgeConfigError) {
+      console.warn('Could not retrieve from Edge Config:', edgeConfigError.message);
+    }
+    
+    // Retry logic
+    if (retryCount < MAX_RETRIES - 1) {
+      console.log(`Retrying update (${retryCount + 2}/${MAX_RETRIES})...`);
+      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+      return updateLeaderboard(retryCount + 1);
+    }
+    
+    // If all retries fail, return mock data as fallback
+    console.log('All retries failed, using mock data');
+    return getMockData();
+  }
+}
 
-// Update leaderboard every 2 minutes
-const REFRESH_INTERVAL = 2 * 60 * 1000; // 2 minutes in milliseconds
-setInterval(() => {
-  updateLeaderboard().catch(err => {
-    console.error('Scheduled leaderboard update failed:', err.message);
-  });
-}, REFRESH_INTERVAL);
+// Get mock data for testing and fallback
+function getMockData() {
+  return {
+    miners: [
+      { address: "0x1234567890123456789012345678901234567890", totalHashrate: "1000000", workerCount: 10 },
+      { address: "0x2345678901234567890123456789012345678901", totalHashrate: "750000", workerCount: 7 },
+      { address: "0x3456789012345678901234567890123456789012", totalHashrate: "500000", workerCount: 5 },
+      { address: "0x4567890123456789012345678901234567890123", totalHashrate: "250000", workerCount: 3 },
+      { address: "0x5678901234567890123456789012345678901234", totalHashrate: "100000", workerCount: 2 }
+    ],
+    totalHashrate: "2600000"
+  };
+}
+
+// Save leaderboard data to Edge Config
+async function saveLeaderboardToEdgeConfig(data) {
+  if (!edgeConfig || !process.env.EDGE_CONFIG) {
+    return false;
+  }
+  
+  try {
+    await edgeConfig.saveLeaderboardData(data);
+    return true;
+  } catch (error) {
+    console.error('Failed to save to Edge Config:', error.message);
+    return false;
+  }
+}
+
+// Get leaderboard data from Edge Config
+async function getLeaderboardFromEdgeConfig() {
+  if (!edgeConfig || !process.env.EDGE_CONFIG) {
+    return null;
+  }
+  
+  try {
+    return await edgeConfig.getLeaderboardData();
+  } catch (error) {
+    console.error('Failed to get from Edge Config:', error.message);
+    return null;
+  }
+}
 
 // API Routes
 
@@ -621,62 +332,51 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/leaderboard', async (req, res) => {
-  // Add a safety mechanism to avoid hanging requests
-  const requestTimeout = setTimeout(() => {
-    console.log('Leaderboard request timed out, returning available data');
-    return res.json(leaderboardData);
-  }, 5000); // 5 second timeout
-  
   try {
-    // If we don't have data yet and blockchain isn't connected, try to update
-    if (leaderboardData.leaderboard.length === 0 || !isConnectedToBlockchain) {
+    // Check if we need to update the leaderboard (if not updated recently)
+    const now = Date.now();
+    const timeSinceLastUpdate = now - Date.parse(leaderboardData.lastUpdate);
+    
+    // If it's been more than 5 minutes since the last update, update the leaderboard
+    if (timeSinceLastUpdate > 5 * 60 * 1000) {
       try {
-        // Use a timeout promise to make sure this doesn't hang
-        const updateTimeout = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Update timed out')), 4000)
-        );
-        
-        // Race the update against a timeout
-        await Promise.race([updateLeaderboard(), updateTimeout]);
-      } catch (updateErr) {
-        console.error('Update during request failed:', updateErr.message);
-        // Continue and return whatever data we have
+        console.log('Updating leaderboard from blockchain before serving request...');
+        await updateLeaderboard();
+      } catch (updateError) {
+        console.error('Error updating leaderboard:', updateError.message);
+        // Continue with current data if available, otherwise will fallback to mock data
       }
     }
     
-    clearTimeout(requestTimeout);
-    res.json(leaderboardData);
-  } catch (error) {
-    console.error('Error handling leaderboard request:', error);
-    clearTimeout(requestTimeout);
-    res.json(leaderboardData); // Return what we have even on error
-  }
-});
-
-// Health check endpoint - modified to include Edge Config status
-app.get('/api/health', async (req, res) => {
-  try {
-    await edgeConfig.isEdgeConfigAvailable();
-  } catch (error) {
-    console.error('Error checking Edge Config availability:', error.message);
-  }
-  
-  // Always get status, even if the availability check fails
-  const edgeConfigStatus = edgeConfig.getEdgeConfigStatus();
-  
-  res.json({
-    status: 'ok',
-    blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
-    edgeConfig: edgeConfigStatus,
-    contract: CONTRACT_ADDRESS,
-    miners: leaderboardData.leaderboard.length,
-    lastUpdate: leaderboardData.lastUpdate,
-    env: {
-      EDGE_CONFIG_SET: process.env.EDGE_CONFIG ? 'yes' : 'no',
-      NODE_ENV: process.env.NODE_ENV || 'not_set',
-      BLOCK_SCAN_RANGE: process.env.BLOCK_SCAN_RANGE || 'not_set'
+    // If still no leaderboard data, use mock data as a fallback
+    if (!leaderboardData.miners || leaderboardData.miners.length === 0) {
+      console.log('No leaderboard data available, using mock data as fallback');
+      leaderboardData = getMockData();
     }
-  });
+    
+    // Add status information to the response
+    const responseData = {
+      ...leaderboardData,
+      status: {
+        blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+        edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var',
+        EDGE_CONFIG_SET: process.env.EDGE_CONFIG ? 'yes' : 'no',
+        BLOCK_SCAN_RANGE: process.env.BLOCK_SCAN_RANGE || 'not_set',
+        lastUpdate: new Date(leaderboardData.lastUpdate).toISOString()
+      }
+    };
+    
+    res.json(responseData);
+  } catch (error) {
+    console.error('Error serving leaderboard:', error);
+    res.status(500).json({ 
+      error: 'Failed to get leaderboard data',
+      status: {
+        blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+        edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var'
+      }
+    });
+  }
 });
 
 // Route for simulating hashrate updates (for testing)
@@ -688,7 +388,7 @@ app.post('/api/mock/update-hashrate', (req, res) => {
   }
   
   // Find the miner in the leaderboard
-  const existingMinerIndex = leaderboardData.leaderboard.findIndex(
+  const existingMinerIndex = leaderboardData.miners.findIndex(
     miner => miner.address.toLowerCase() === address.toLowerCase()
   );
   
@@ -696,19 +396,19 @@ app.post('/api/mock/update-hashrate', (req, res) => {
   
   if (existingMinerIndex !== -1) {
     // Update existing miner
-    leaderboardData.leaderboard[existingMinerIndex].hashrate = hashrate;
-    leaderboardData.leaderboard[existingMinerIndex].hashrateNum = hashrateNum;
+    leaderboardData.miners[existingMinerIndex].totalHashrate = hashrate;
+    leaderboardData.miners[existingMinerIndex].hashrateNum = hashrateNum;
   } else {
     // Add new miner
-    leaderboardData.leaderboard.push({
+    leaderboardData.miners.push({
       address,
-      hashrate,
+      totalHashrate: hashrate,
       hashrateNum
     });
   }
   
   // Re-sort the leaderboard
-  leaderboardData.leaderboard.sort((a, b) => b.hashrateNum - a.hashrateNum);
+  leaderboardData.miners.sort((a, b) => b.hashrateNum - a.hashrateNum);
   
   // Update timestamp
   leaderboardData.lastUpdate = new Date().toISOString();

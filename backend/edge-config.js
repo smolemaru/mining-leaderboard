@@ -1,129 +1,140 @@
 /**
  * Edge Config helper module for Mining Leaderboard
- * Provides functionality to store and retrieve leaderboard data using Vercel Edge Config
+ * 
+ * This module handles interactions with Vercel Edge Config,
+ * with fallbacks for local development or when Edge Config is not available.
  */
 
 const { createClient } = require('@vercel/edge-config');
 
-// Create Edge Config client
-// This will automatically use the EDGE_CONFIG environment variable set in Vercel
-let edgeConfig;
-let edgeConfigStatus = 'not_initialized';
-
-try {
-  console.log('Initializing Edge Config client...');
-  if (!process.env.EDGE_CONFIG) {
-    console.error('EDGE_CONFIG environment variable is not set');
-    edgeConfigStatus = 'missing_env_var';
-  } else {
-    console.log(`Using EDGE_CONFIG: ${process.env.EDGE_CONFIG.substring(0, 15)}...`);
-    edgeConfig = createClient(process.env.EDGE_CONFIG);
-    console.log('Edge Config client initialized successfully');
-    edgeConfigStatus = 'initialized';
-  }
-} catch (error) {
-  console.error('Error initializing Edge Config client:', error.message);
-  console.log('Will fall back to in-memory storage');
-  edgeConfig = null;
-  edgeConfigStatus = 'initialization_failed';
-}
+// Local storage to use as fallback when Edge Config is not available
+let localLeaderboardCache = null;
 
 /**
- * Store leaderboard data in Edge Config
- * @param {Object} data - The leaderboard data to store
- * @returns {Promise<boolean>} - Whether the storage was successful
+ * Initialize Edge Config client if environment variable is set
  */
-async function storeLeaderboardData(data) {
-  if (!edgeConfig) {
-    console.log('Edge Config not available, skipping storage');
-    return false;
+function initEdgeConfig() {
+  // Check if the EDGE_CONFIG environment variable is set
+  if (!process.env.EDGE_CONFIG) {
+    console.warn('EDGE_CONFIG environment variable is not set. Edge Config features will be disabled.');
+    return null;
   }
-
+  
   try {
-    // Store the data with the key 'leaderboard'
-    await edgeConfig.set('leaderboard', data);
-    console.log('Leaderboard data stored in Edge Config');
-    
-    // Also store the last update time for tracking
-    await edgeConfig.set('lastUpdate', new Date().toISOString());
+    const client = createClient(process.env.EDGE_CONFIG);
+    console.log('Edge Config client initialized successfully');
+    return client;
+  } catch (error) {
+    console.error('Failed to initialize Edge Config client:', error.message);
+    return null;
+  }
+}
+
+// Initialize the Edge Config client
+const edgeConfigClient = initEdgeConfig();
+
+/**
+ * Saves leaderboard data to Edge Config
+ * Falls back to local cache if Edge Config is not available
+ * 
+ * @param {Object} leaderboardData - The leaderboard data to save
+ * @returns {Promise<boolean>} - Success status
+ */
+async function saveLeaderboardData(leaderboardData) {
+  // Add timestamp
+  const dataToSave = {
+    ...leaderboardData,
+    lastSaved: new Date().toISOString()
+  };
+  
+  // Save to local cache first
+  localLeaderboardCache = dataToSave;
+  
+  // If Edge Config is not available, return successfully with local cache only
+  if (!edgeConfigClient) {
+    console.log('Edge Config not available, saved to local cache only');
+    return true;
+  }
+  
+  try {
+    await edgeConfigClient.set('leaderboardData', dataToSave);
+    console.log('Leaderboard data saved to Edge Config successfully');
     return true;
   } catch (error) {
-    console.error('Error storing data in Edge Config:', error.message);
+    console.error('Failed to save leaderboard data to Edge Config:', error.message);
+    console.log('Using local cache as fallback');
     return false;
   }
 }
 
 /**
- * Get leaderboard data from Edge Config
- * @returns {Promise<Object|null>} - The leaderboard data or null if not available
+ * Retrieves leaderboard data from Edge Config
+ * Falls back to local cache if Edge Config is not available or fails
+ * 
+ * @returns {Promise<Object|null>} - The leaderboard data or null if not found
  */
 async function getLeaderboardData() {
-  if (!edgeConfig) {
-    console.log('Edge Config not available, returning null');
-    return null;
+  // If Edge Config is not available, return local cache
+  if (!edgeConfigClient) {
+    console.log('Edge Config not available, using local cache');
+    return localLeaderboardCache;
   }
-
+  
   try {
-    // Get the data with the key 'leaderboard'
-    const data = await edgeConfig.get('leaderboard');
-    console.log('Retrieved leaderboard data from Edge Config');
+    const data = await edgeConfigClient.get('leaderboardData');
+    
+    if (!data) {
+      console.log('No leaderboard data found in Edge Config, using local cache');
+      return localLeaderboardCache;
+    }
+    
+    console.log('Leaderboard data retrieved from Edge Config successfully');
+    // Update local cache with the latest data
+    localLeaderboardCache = data;
     return data;
   } catch (error) {
-    console.error('Error retrieving data from Edge Config:', error.message);
-    return null;
+    console.error('Failed to retrieve leaderboard data from Edge Config:', error.message);
+    console.log('Using local cache as fallback');
+    return localLeaderboardCache;
   }
 }
 
 /**
- * Get last update time from Edge Config
- * @returns {Promise<string|null>} - ISO timestamp of last update or null
+ * Checks if Edge Config is properly configured and accessible
+ * 
+ * @returns {Promise<boolean>} - Whether Edge Config is working properly
  */
-async function getLastUpdateTime() {
-  if (!edgeConfig) {
-    return null;
-  }
-
-  try {
-    return await edgeConfig.get('lastUpdate');
-  } catch (error) {
-    console.error('Error retrieving last update time:', error.message);
-    return null;
-  }
-}
-
-/**
- * Get Edge Config status
- * @returns {string} - Current status of Edge Config
- */
-function getEdgeConfigStatus() {
-  return edgeConfigStatus;
-}
-
-/**
- * Check if Edge Config is available and working
- * @returns {Promise<boolean>} - Whether Edge Config is available
- */
-async function isEdgeConfigAvailable() {
-  if (!edgeConfig) {
+async function isEdgeConfigWorking() {
+  if (!edgeConfigClient) {
     return false;
   }
-
+  
   try {
-    // Try a simple operation to check if Edge Config is working
-    const hasKey = await edgeConfig.has('lastUpdate');
-    edgeConfigStatus = 'available';
+    // Try to read a test value
+    await edgeConfigClient.get('test');
     return true;
   } catch (error) {
-    console.error('Edge Config availability check failed:', error.message);
-    edgeConfigStatus = 'connection_failed';
+    console.error('Edge Config health check failed:', error.message);
     return false;
   }
+}
+
+/**
+ * Gets Edge Config status information
+ * 
+ * @returns {Object} - Status information
+ */
+function getEdgeConfigStatus() {
+  return {
+    available: !!edgeConfigClient,
+    envVarSet: !!process.env.EDGE_CONFIG,
+    localCacheAvailable: !!localLeaderboardCache
+  };
 }
 
 module.exports = {
-  storeLeaderboardData,
+  saveLeaderboardData,
   getLeaderboardData,
-  getLastUpdateTime,
-  isEdgeConfigAvailable,
+  isEdgeConfigWorking,
   getEdgeConfigStatus
 }; 
