@@ -8,13 +8,24 @@ const { createClient } = require('@vercel/edge-config');
 // Create Edge Config client
 // This will automatically use the EDGE_CONFIG environment variable set in Vercel
 let edgeConfig;
+let edgeConfigStatus = 'not_initialized';
+
 try {
-  edgeConfig = createClient(process.env.EDGE_CONFIG);
-  console.log('Edge Config client initialized');
+  console.log('Initializing Edge Config client...');
+  if (!process.env.EDGE_CONFIG) {
+    console.error('EDGE_CONFIG environment variable is not set');
+    edgeConfigStatus = 'missing_env_var';
+  } else {
+    console.log(`Using EDGE_CONFIG: ${process.env.EDGE_CONFIG.substring(0, 15)}...`);
+    edgeConfig = createClient(process.env.EDGE_CONFIG);
+    console.log('Edge Config client initialized successfully');
+    edgeConfigStatus = 'initialized';
+  }
 } catch (error) {
   console.error('Error initializing Edge Config client:', error.message);
   console.log('Will fall back to in-memory storage');
   edgeConfig = null;
+  edgeConfigStatus = 'initialization_failed';
 }
 
 /**
@@ -81,6 +92,14 @@ async function getLastUpdateTime() {
 }
 
 /**
+ * Get Edge Config status
+ * @returns {string} - Current status of Edge Config
+ */
+function getEdgeConfigStatus() {
+  return edgeConfigStatus;
+}
+
+/**
  * Check if Edge Config is available and working
  * @returns {Promise<boolean>} - Whether Edge Config is available
  */
@@ -91,10 +110,12 @@ async function isEdgeConfigAvailable() {
 
   try {
     // Try a simple operation to check if Edge Config is working
-    await edgeConfig.has('lastUpdate');
+    const hasKey = await edgeConfig.has('lastUpdate');
+    edgeConfigStatus = 'available';
     return true;
   } catch (error) {
     console.error('Edge Config availability check failed:', error.message);
+    edgeConfigStatus = 'connection_failed';
     return false;
   }
 }
@@ -103,5 +124,6 @@ module.exports = {
   storeLeaderboardData,
   getLeaderboardData,
   getLastUpdateTime,
-  isEdgeConfigAvailable
+  isEdgeConfigAvailable,
+  getEdgeConfigStatus
 }; 

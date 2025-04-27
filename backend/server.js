@@ -19,7 +19,9 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Connect to blockchain provider
-const RPC_URL = 'https://api.mainnet.abs.xyz';
+const RPC_URL = process.env.RPC_URL || 'https://api.mainnet.abs.xyz';
+const RPC_URL_ALTERNATE = process.env.RPC_URL_ALTERNATE || 'https://eth.llamarpc.com';
+
 let provider;
 let contract;
 let isConnectedToBlockchain = false;
@@ -29,11 +31,14 @@ const isEthersV6 = ethers.version && parseInt(ethers.version.split('.')[0]) >= 6
 console.log(`Using ethers.js version: ${isEthersV6 ? 'v6+' : 'v5'}`);
 
 try {
-  // Initialize provider based on ethers version
+  // Initialize provider based on ethers version and environment
+  const providerUrl = process.env.NODE_ENV === 'production' ? RPC_URL_ALTERNATE : RPC_URL;
+  console.log(`Using RPC URL: ${providerUrl}`);
+  
   if (isEthersV6) {
-    provider = new ethers.JsonRpcProvider(RPC_URL);
+    provider = new ethers.JsonRpcProvider(providerUrl);
   } else {
-    provider = new ethers.providers.JsonRpcProvider(RPC_URL);
+    provider = new ethers.providers.JsonRpcProvider(providerUrl);
   }
   console.log('Provider initialized');
 } catch (error) {
@@ -519,15 +524,27 @@ app.get('/api/leaderboard', (req, res) => {
 
 // Health check endpoint - modified to include Edge Config status
 app.get('/api/health', async (req, res) => {
-  const edgeConfigAvailable = await edgeConfig.isEdgeConfigAvailable();
+  try {
+    await edgeConfig.isEdgeConfigAvailable();
+  } catch (error) {
+    console.error('Error checking Edge Config availability:', error.message);
+  }
+  
+  // Always get status, even if the availability check fails
+  const edgeConfigStatus = edgeConfig.getEdgeConfigStatus();
   
   res.json({
     status: 'ok',
     blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
-    edgeConfig: edgeConfigAvailable ? 'available' : 'unavailable',
+    edgeConfig: edgeConfigStatus,
     contract: CONTRACT_ADDRESS,
     miners: leaderboardData.leaderboard.length,
-    lastUpdate: leaderboardData.lastUpdate
+    lastUpdate: leaderboardData.lastUpdate,
+    env: {
+      EDGE_CONFIG_SET: process.env.EDGE_CONFIG ? 'yes' : 'no',
+      NODE_ENV: process.env.NODE_ENV || 'not_set',
+      BLOCK_SCAN_RANGE: process.env.BLOCK_SCAN_RANGE || 'not_set'
+    }
   });
 });
 
