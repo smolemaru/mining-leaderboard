@@ -2,6 +2,7 @@ const express = require('express');
 const ethers = require('ethers');
 const cors = require('cors');
 const path = require('path');
+const edgeConfig = require('./edge-config');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -103,10 +104,18 @@ leaderboardData.leaderboard = [...mockLeaderboard];
 leaderboardData.lastUpdate = new Date().toISOString();
 console.log('Using mock data for initial load');
 
-// Function to update leaderboard from blockchain
+// Modified function to update leaderboard from blockchain
 async function updateLeaderboard() {
   try {
     console.log('Updating leaderboard from blockchain...');
+    
+    // First check if we can get data from Edge Config
+    const edgeConfigData = await edgeConfig.getLeaderboardData();
+    if (edgeConfigData) {
+      console.log('Got leaderboard data from Edge Config, using as baseline');
+      leaderboardData = edgeConfigData;
+      isConnectedToBlockchain = true; // Assume we're connected if we have Edge Config data
+    }
     
     if (!contract || !provider) {
       throw new Error('Contract or provider not initialized');
@@ -441,13 +450,25 @@ async function updateLeaderboard() {
     // Update timestamp
     leaderboardData.lastUpdate = new Date().toISOString();
     
+    // After successfully updating leaderboard data, store in Edge Config
+    if (leaderboardData.leaderboard.length > 0) {
+      await edgeConfig.storeLeaderboardData(leaderboardData);
+    }
+    
     console.log(`Leaderboard updated with ${leaderboardData.leaderboard.length} miners.`);
   } catch (error) {
     console.error('Error updating leaderboard:', error);
     isConnectedToBlockchain = false;
     
-    // If we don't have any data yet, use mock data
-    if (leaderboardData.leaderboard.length === 0) {
+    // Try to get data from Edge Config as fallback
+    const edgeConfigData = await edgeConfig.getLeaderboardData();
+    if (edgeConfigData) {
+      console.log('Using Edge Config data as fallback');
+      leaderboardData = edgeConfigData;
+      // Mark as not connected but we still have data
+      isConnectedToBlockchain = false;
+    } else if (leaderboardData.leaderboard.length === 0) {
+      // If we don't have any data yet from Edge Config, use mock data
       console.log('Using mock data as fallback');
       leaderboardData.leaderboard = [...mockLeaderboard];
       leaderboardData.lastUpdate = new Date().toISOString();
@@ -496,11 +517,14 @@ app.get('/api/leaderboard', (req, res) => {
   res.json(leaderboardData);
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
+// Health check endpoint - modified to include Edge Config status
+app.get('/api/health', async (req, res) => {
+  const edgeConfigAvailable = await edgeConfig.isEdgeConfigAvailable();
+  
   res.json({
     status: 'ok',
     blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+    edgeConfig: edgeConfigAvailable ? 'available' : 'unavailable',
     contract: CONTRACT_ADDRESS,
     miners: leaderboardData.leaderboard.length,
     lastUpdate: leaderboardData.lastUpdate
@@ -545,6 +569,40 @@ app.post('/api/mock/update-hashrate', (req, res) => {
     success: true,
     message: 'Hashrate updated successfully'
   });
+});
+
+// Cron job endpoint for Vercel Cron Jobs
+app.get('/api/cron/update-leaderboard', async (req, res) => {
+  // Check if the request is coming from Vercel Cron
+  const isVercelCron = req.headers['x-vercel-cron'] === 'true';
+  
+  if (!isVercelCron && process.env.NODE_ENV === 'production') {
+    return res.status(401).json({
+      error: 'Unauthorized',
+      message: 'This endpoint can only be called by Vercel Cron Jobs'
+    });
+  }
+  
+  try {
+    // Import cron job function
+    const updateLeaderboardData = require('./cron');
+    
+    // Execute cron job
+    console.log('Executing cron job to update leaderboard data');
+    await updateLeaderboardData();
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Leaderboard data updated successfully'
+    });
+  } catch (error) {
+    console.error('Error executing cron job:', error);
+    
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Failed to update leaderboard data'
+    });
+  }
 });
 
 // Start the server

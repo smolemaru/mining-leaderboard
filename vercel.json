@@ -13,5 +13,11 @@
       "memory": 1024,
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/update-leaderboard",
+      "schedule": "0 */30 * * *"
+    }
+  ]
 } 
