@@ -145,14 +145,23 @@ async function updateLeaderboard() {
       
       // Get the most recent blocknumber
       const latestBlock = await provider.getBlockNumber();
-      const fromBlock = Math.max(1, latestBlock - 4000000); // Look back ~4M blocks to ensure all miners are captured
+      console.log(`Latest block: ${latestBlock}`);
+      
+      // Get block scan range from environment variable
+      const blockScanRange = process.env.BLOCK_SCAN_RANGE ? 
+        parseInt(process.env.BLOCK_SCAN_RANGE) : 
+        (process.env.NODE_ENV === 'production' ? 100000 : 4000000);
+      
+      console.log(`Using block scan range: ${blockScanRange} (from ${process.env.BLOCK_SCAN_RANGE ? 'env variable' : 'default'})`);
+      
+      const fromBlock = Math.max(1, latestBlock - blockScanRange);
       
       console.log(`Full scanning block range: ${fromBlock} to ${latestBlock} (total: ${latestBlock - fromBlock} blocks)`);
       
       // Find miner addresses from events - focus on InitialFacilityPurchased events first
       const minerAddresses = new Set();
       
-      // Function to handle paginated event scanning
+      // Function to handle paginated event scanning with timeouts
       async function scanEventsWithPagination(eventName, filter) {
         if (!contract.filters[eventName]) {
           console.log(`Filter for ${eventName} not available`);
@@ -162,18 +171,33 @@ async function updateLeaderboard() {
         try {
           console.log(`Searching for events using filter: ${eventName}`);
           
-          // Use a smaller chunk size to stay within provider limits
-          // Most RPC providers have a limit of 10,000 events per request
-          const CHUNK_SIZE = 100000; // 100k blocks per chunk
+          // Use a smaller chunk size for serverless environment
+          const CHUNK_SIZE = process.env.NODE_ENV === 'production' ? 50000 : 100000;
+          console.log(`Using chunk size: ${CHUNK_SIZE} blocks`);
+          
           let eventsCount = 0;
           
+          // For serverless environment, only scan a few chunks to avoid timeout
+          const MAX_CHUNKS = process.env.NODE_ENV === 'production' ? 2 : 100;
+          let chunksProcessed = 0;
+          
           // Scan the blockchain in chunks
-          for (let chunkStart = fromBlock; chunkStart < latestBlock; chunkStart += CHUNK_SIZE) {
+          for (let chunkStart = fromBlock; chunkStart < latestBlock && chunksProcessed < MAX_CHUNKS; chunkStart += CHUNK_SIZE) {
+            chunksProcessed++;
             const chunkEnd = Math.min(chunkStart + CHUNK_SIZE - 1, latestBlock);
-            console.log(`Scanning ${eventName} events for block range: ${chunkStart} to ${chunkEnd}`);
+            console.log(`Scanning ${eventName} events for block range: ${chunkStart} to ${chunkEnd} (chunk ${chunksProcessed}/${MAX_CHUNKS})`);
             
             try {
-              const events = await contract.queryFilter(filter, chunkStart, chunkEnd);
+              // Add timeout to prevent hanging
+              const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Query timeout after 15s')), 15000)
+              );
+              
+              const eventsPromise = contract.queryFilter(filter, chunkStart, chunkEnd);
+              
+              // Race between the query and the timeout
+              const events = await Promise.race([eventsPromise, timeoutPromise]);
+              
               eventsCount += events.length;
               
               // Extract addresses from events
@@ -200,21 +224,43 @@ async function updateLeaderboard() {
               console.log(`Running total of unique addresses: ${minerAddresses.size}`);
               
             } catch (chunkErr) {
-              // If a chunk fails, log the error and try to reduce the chunk size
+              // If a chunk fails, log the error and continue with the next chunk
               console.log(`Error scanning ${eventName} for block range ${chunkStart}-${chunkEnd}: ${chunkErr.message}`);
+              
+              // In serverless, if first chunk fails, don't continue with smaller chunks
+              if (process.env.NODE_ENV === 'production') {
+                console.log('Skipping further attempts in serverless environment');
+                continue;
+              }
               
               // If the error mentions "Query returned more than 10000 results", try a smaller chunk
               if (chunkErr.message.includes("more than 10000 results")) {
                 const smallerChunkSize = Math.floor(CHUNK_SIZE / 4);
                 console.log(`Reducing chunk size to ${smallerChunkSize} blocks and retrying...`);
                 
-                // Retry with smaller chunks
-                for (let smallChunkStart = chunkStart; smallChunkStart < chunkEnd; smallChunkStart += smallerChunkSize) {
+                // Retry with smaller chunks but limit attempts
+                const MAX_SMALL_CHUNKS = 2;
+                let smallChunksProcessed = 0;
+                
+                for (let smallChunkStart = chunkStart; 
+                     smallChunkStart < chunkEnd && smallChunksProcessed < MAX_SMALL_CHUNKS; 
+                     smallChunkStart += smallerChunkSize) {
+                  
+                  smallChunksProcessed++;
                   const smallChunkEnd = Math.min(smallChunkStart + smallerChunkSize - 1, chunkEnd);
                   
                   try {
                     console.log(`Scanning with smaller chunk: ${smallChunkStart} to ${smallChunkEnd}`);
-                    const smallChunkEvents = await contract.queryFilter(filter, smallChunkStart, smallChunkEnd);
+                    
+                    // Add timeout for smaller chunk too
+                    const smallTimeoutPromise = new Promise((_, reject) => 
+                      setTimeout(() => reject(new Error('Query timeout after 10s')), 10000)
+                    );
+                    
+                    const smallChunkEventsPromise = contract.queryFilter(filter, smallChunkStart, smallChunkEnd);
+                    
+                    const smallChunkEvents = await Promise.race([smallChunkEventsPromise, smallTimeoutPromise]);
+                    
                     eventsCount += smallChunkEvents.length;
                     
                     // Extract addresses
@@ -242,7 +288,7 @@ async function updateLeaderboard() {
             }
           }
           
-          console.log(`Completed scanning for ${eventName}. Total events found: ${eventsCount}`);
+          console.log(`Completed scanning for ${eventName}. Total events found: ${eventsCount} in ${chunksProcessed} chunks`);
           
         } catch (err) {
           console.log(`Error setting up scan for ${eventName}: ${err.message}`);
@@ -259,12 +305,12 @@ async function updateLeaderboard() {
         }
         
         // Skip other event types since we only want to use InitialFacilityPurchased events
-        console.log(`Using only InitialFacilityPurchased events as requested`);
-        
-        console.log(`Found ${minerAddresses.size} unique addresses from InitialFacilityPurchased events`);
+        console.log(`Using only InitialFacilityPurchased events`);
         
         if (minerAddresses.size === 0) {
-          throw new Error('Could not find any miner addresses from InitialFacilityPurchased events');
+          console.log('Could not find any miner addresses from InitialFacilityPurchased events');
+          // Provide minimal mock data if nothing was found
+          throw new Error('No miners found from events');
         }
         
         // Get hashrate for each miner
@@ -274,31 +320,38 @@ async function updateLeaderboard() {
         const addresses = Array.from(minerAddresses);
         console.log(`Processing ${addresses.length} addresses...`);
         
-        // Process addresses in batches to avoid rate limiting
-        const BATCH_SIZE = 20;
+        // Process addresses in smaller batches for serverless environment
+        const BATCH_SIZE = process.env.NODE_ENV === 'production' ? 10 : 20;
         
-        for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
-          const batch = addresses.slice(i, i + BATCH_SIZE);
+        // Limit the number of addresses processed in serverless
+        const MAX_ADDRESSES = process.env.NODE_ENV === 'production' ? 30 : addresses.length;
+        const addressesToProcess = addresses.slice(0, MAX_ADDRESSES);
+        
+        if (process.env.NODE_ENV === 'production' && addresses.length > MAX_ADDRESSES) {
+          console.log(`Processing only ${MAX_ADDRESSES} addresses out of ${addresses.length} to avoid timeout`);
+        }
+        
+        for (let i = 0; i < addressesToProcess.length; i += BATCH_SIZE) {
+          const batch = addressesToProcess.slice(i, i + BATCH_SIZE);
+          
+          // Add timeout protection for the whole batch
+          const batchTimeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Batch processing timeout after 15s')), 15000)
+          );
           
           // Process each address in the batch concurrently
-          const batchResults = await Promise.all(
+          const batchProcessPromise = Promise.all(
             batch.map(async (address) => {
               try {
-                // Try playerHashrate() function first
-                try {
-                  const hashrate = await contract.playerHashrate(address);
-                  const hashrateNum = Number(hashrate.toString());
-                  
-                  // Include all miners who purchased initial facilities, even with zero hashrate
-                  return {
-                    address,
-                    hashrate: hashrate.toString(),
-                    hashrateNum
-                  };
-                } catch (err) {
-                  // If playerHashrate is not available, try miners mapping
+                // Add timeout for individual address processing
+                const addressTimeoutPromise = new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error(`Timeout processing address ${address}`)), 5000)
+                );
+                
+                const processAddressPromise = (async () => {
+                  // Try playerHashrate() function first
                   try {
-                    const hashrate = await contract.miners(address);
+                    const hashrate = await contract.playerHashrate(address);
                     const hashrateNum = Number(hashrate.toString());
                     
                     return {
@@ -306,39 +359,59 @@ async function updateLeaderboard() {
                       hashrate: hashrate.toString(),
                       hashrateNum
                     };
-                  } catch (minerErr) {
-                    // If both fail, check if they have initializedStarterFacility
+                  } catch (err) {
+                    // If playerHashrate is not available, try miners mapping
                     try {
-                      const hasInitialFacility = await contract.initializedStarterFacility(address);
-                      if (hasInitialFacility) {
-                        return {
-                          address,
-                          hashrate: '0',
-                          hashrateNum: 0
-                        };
-                      }
-                    } catch (facilityErr) {
-                      // If all checks fail, log and return null
-                      console.log(`Could not get data for ${address}`);
-                      return null;
+                      const hashrate = await contract.miners(address);
+                      const hashrateNum = Number(hashrate.toString());
+                      
+                      return {
+                        address,
+                        hashrate: hashrate.toString(),
+                        hashrateNum
+                      };
+                    } catch (minerErr) {
+                      // If both fail, assign zero hashrate since we know they're players
+                      return {
+                        address,
+                        hashrate: '0',
+                        hashrateNum: 0
+                      };
                     }
                   }
-                }
+                })();
+                
+                // Race between processing and timeout
+                return await Promise.race([processAddressPromise, addressTimeoutPromise]);
+                
               } catch (err) {
                 console.log(`Error getting data for ${address}:`, err.message);
+                // Return a minimal object with zero hashrate for this address
+                return {
+                  address,
+                  hashrate: '0',
+                  hashrateNum: 0
+                };
               }
-              return null;
             })
           );
           
-          // Filter out null results and add to minerData
-          minerData.push(...batchResults.filter(data => data !== null));
-          
-          console.log(`Processed batch ${i / BATCH_SIZE + 1}/${Math.ceil(addresses.length / BATCH_SIZE)}, found ${minerData.length} miners with data so far`);
+          try {
+            // Race between the whole batch and a timeout
+            const batchResults = await Promise.race([batchProcessPromise, batchTimeoutPromise]);
+            
+            // Filter out null results and add to minerData
+            minerData.push(...batchResults.filter(data => data !== null));
+            
+            console.log(`Processed batch ${i / BATCH_SIZE + 1}/${Math.ceil(addressesToProcess.length / BATCH_SIZE)}, found ${minerData.length} miners with data so far`);
+          } catch (batchErr) {
+            console.log(`Batch processing error: ${batchErr.message}`);
+            // Continue with next batch
+          }
         }
         
         if (minerData.length === 0) {
-          throw new Error('No miners found');
+          throw new Error('No miners found with hashrate data');
         }
         
         // If we calculated individual hashrates but couldn't get totalHashrate directly,

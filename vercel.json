@@ -7,5 +7,11 @@
   "routes": [
     { "src": "/api/(.*)", "dest": "backend/server.js" },
     { "src": "/(.*)", "dest": "frontend/$1" }
-  ]
+  ],
+  "functions": {
+    "backend/server.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
 } 
