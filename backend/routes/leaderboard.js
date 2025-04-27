@@ -1,24 +1,39 @@
 const express = require('express');
 const router = express.Router();
-
-// Import any necessary services, likely from blockchain or database services
-const { isConnectedToBlockchain, leaderboardData, lastUpdateTime } = require('../services/blockchain');
+const blockchainService = require('../services/blockchain');
 
 // Get the leaderboard data
 router.get('/', async (req, res) => {
   try {
-    // If leaderboard data exists and is recent (less than 5 minutes old)
-    const currentTime = Date.now();
-    const dataAge = currentTime - lastUpdateTime;
+    // Check if we need to update the leaderboard (if not updated recently)
+    const now = Date.now();
+    const dataAge = now - blockchainService.lastUpdateTime;
     const isDataRecent = dataAge < 5 * 60 * 1000; // 5 minutes in milliseconds
+    
+    let data;
+    
+    // If data is not recent, try to update it
+    if (!isDataRecent) {
+      try {
+        console.log('Data is stale, updating leaderboard...');
+        data = await blockchainService.updateLeaderboard();
+      } catch (updateError) {
+        console.error('Error updating leaderboard:', updateError.message);
+        // Continue with current data if available
+        data = blockchainService.leaderboardData;
+      }
+    } else {
+      // Use cached data
+      data = blockchainService.leaderboardData;
+    }
 
     // Add status information to the response
     const response = {
-      ...leaderboardData,
+      ...data,
       status: {
-        blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+        blockchain: blockchainService.isConnectedToBlockchain ? 'connected' : 'disconnected',
         edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var',
-        lastUpdate: new Date(lastUpdateTime).toISOString(),
+        lastUpdate: new Date(blockchainService.lastUpdateTime).toISOString(),
         dataAge: Math.round(dataAge / 1000) // Age in seconds
       }
     };
@@ -30,9 +45,9 @@ router.get('/', async (req, res) => {
       error: 'Failed to retrieve leaderboard data',
       message: error.message,
       status: {
-        blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+        blockchain: blockchainService.isConnectedToBlockchain ? 'connected' : 'disconnected',
         edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var',
-        lastUpdate: lastUpdateTime ? new Date(lastUpdateTime).toISOString() : null
+        lastUpdate: blockchainService.lastUpdateTime ? new Date(blockchainService.lastUpdateTime).toISOString() : null
       }
     });
   }
@@ -42,16 +57,16 @@ router.get('/', async (req, res) => {
 router.post('/refresh', async (req, res) => {
   try {
     // Call the updateLeaderboard function to force a refresh
-    const blockchainService = require('../services/blockchain');
+    console.log('Force refreshing leaderboard data...');
     const refreshedData = await blockchainService.updateLeaderboard(true); // Pass true to force refresh
     
     // Return the refreshed data with status
     res.json({
       ...refreshedData,
       status: {
-        blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+        blockchain: blockchainService.isConnectedToBlockchain ? 'connected' : 'disconnected',
         edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var',
-        lastUpdate: new Date(lastUpdateTime).toISOString()
+        lastUpdate: new Date(blockchainService.lastUpdateTime).toISOString()
       }
     });
   } catch (error) {
@@ -60,9 +75,9 @@ router.post('/refresh', async (req, res) => {
       error: 'Failed to refresh leaderboard data',
       message: error.message,
       status: {
-        blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+        blockchain: blockchainService.isConnectedToBlockchain ? 'connected' : 'disconnected',
         edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var',
-        lastUpdate: lastUpdateTime ? new Date(lastUpdateTime).toISOString() : null
+        lastUpdate: blockchainService.lastUpdateTime ? new Date(blockchainService.lastUpdateTime).toISOString() : null
       }
     });
   }
