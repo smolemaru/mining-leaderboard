@@ -19,8 +19,17 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Connect to blockchain provider
-const RPC_URL = process.env.RPC_URL || 'https://api.mainnet.abs.xyz';
-const RPC_URL_ALTERNATE = process.env.RPC_URL_ALTERNATE || 'https://eth.llamarpc.com';
+// Define multiple RPC URLs in order of preference 
+const RPC_URLS = [
+  process.env.RPC_URL || 'https://api.mainnet.abs.xyz',
+  process.env.RPC_URL_ALTERNATE || 'https://abstract.drpc.org',
+  'https://eth.llamarpc.com' // Generic fallback
+];
+
+// WebSocket URLs if needed
+const WS_RPC_URLS = [
+  process.env.WS_RPC_URL || 'wss://abstract.drpc.org'
+];
 
 let provider;
 let contract;
@@ -30,21 +39,69 @@ let isConnectedToBlockchain = false;
 const isEthersV6 = ethers.version && parseInt(ethers.version.split('.')[0]) >= 6;
 console.log(`Using ethers.js version: ${isEthersV6 ? 'v6+' : 'v5'}`);
 
-try {
-  // Initialize provider based on ethers version and environment
-  const providerUrl = process.env.NODE_ENV === 'production' ? RPC_URL_ALTERNATE : RPC_URL;
-  console.log(`Using RPC URL: ${providerUrl}`);
+// Initialize provider with fallback mechanism
+async function initializeProvider() {
+  console.log('Initializing provider with fallback mechanism...');
   
-  if (isEthersV6) {
-    provider = new ethers.JsonRpcProvider(providerUrl);
-  } else {
-    provider = new ethers.providers.JsonRpcProvider(providerUrl);
+  // Try each RPC URL in order
+  for (let i = 0; i < RPC_URLS.length; i++) {
+    const url = RPC_URLS[i];
+    try {
+      console.log(`Trying RPC URL (${i+1}/${RPC_URLS.length}): ${url}`);
+      
+      let tempProvider;
+      if (isEthersV6) {
+        tempProvider = new ethers.JsonRpcProvider(url);
+      } else {
+        tempProvider = new ethers.providers.JsonRpcProvider(url);
+      }
+      
+      // Test the connection
+      const blockNumber = await tempProvider.getBlockNumber();
+      console.log(`Connection successful to ${url}, current block: ${blockNumber}`);
+      
+      // If we get here, connection worked
+      provider = tempProvider;
+      return true;
+    } catch (error) {
+      console.error(`Failed to connect to ${url}: ${error.message}`);
+    }
   }
-  console.log('Provider initialized');
-} catch (error) {
-  console.error('Error initializing provider:', error.message);
-  provider = null;
+  
+  // If we get here, all connections failed
+  console.error('All RPC connections failed');
+  return false;
 }
+
+// Initialize contract
+async function initializeContract() {
+  if (!provider) {
+    console.error('Cannot initialize contract: Provider not available');
+    return false;
+  }
+  
+  try {
+    contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+    console.log('Contract initialized successfully');
+    return true;
+  } catch (error) {
+    console.error('Error initializing contract:', error.message);
+    contract = null;
+    return false;
+  }
+}
+
+// Try to initialize provider and contract
+(async function() {
+  try {
+    const providerInitialized = await initializeProvider();
+    if (providerInitialized) {
+      await initializeContract();
+    }
+  } catch (error) {
+    console.error('Initialization error:', error.message);
+  }
+})();
 
 // Contract details
 const CONTRACT_ADDRESS = '0x09Ee83D8fA0f3F03f2aefad6a82353c1e5DE5705';
@@ -72,17 +129,6 @@ const CONTRACT_ABI = [
   {"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"player","type":"address"}],"name":"InitialFacilityPurchased","type":"event"}
 ];
 
-// Initialize contract instance
-try {
-  if (provider) {
-    contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
-    console.log('Contract initialized');
-  }
-} catch (error) {
-  console.error('Error initializing contract:', error.message);
-  contract = null;
-}
-
 // Leaderboard data
 let leaderboardData = {
   leaderboard: [],
@@ -109,7 +155,7 @@ leaderboardData.leaderboard = [...mockLeaderboard];
 leaderboardData.lastUpdate = new Date().toISOString();
 console.log('Using mock data for initial load');
 
-// Modified function to update leaderboard from blockchain
+// Function to update leaderboard from blockchain
 async function updateLeaderboard() {
   try {
     console.log('Updating leaderboard from blockchain...');
@@ -119,11 +165,20 @@ async function updateLeaderboard() {
     if (edgeConfigData) {
       console.log('Got leaderboard data from Edge Config, using as baseline');
       leaderboardData = edgeConfigData;
-      isConnectedToBlockchain = true; // Assume we're connected if we have Edge Config data
+      // Don't set isConnectedToBlockchain here - we'll check actual connection below
     }
     
-    if (!contract || !provider) {
-      throw new Error('Contract or provider not initialized');
+    // If provider or contract not initialized, try to initialize them
+    if (!provider || !contract) {
+      console.log('Provider or contract not initialized, attempting to initialize...');
+      const providerInitialized = await initializeProvider();
+      if (providerInitialized) {
+        await initializeContract();
+      }
+      
+      if (!provider || !contract) {
+        throw new Error('Failed to initialize provider or contract');
+      }
     }
     
     // Check if provider is connected
@@ -139,7 +194,25 @@ async function updateLeaderboard() {
       isConnectedToBlockchain = true;
     } catch (err) {
       console.error('Network check failed:', err.message);
-      throw new Error('Cannot connect to blockchain network');
+      
+      // Try to reinitialize the provider
+      console.log('Attempting to reinitialize provider...');
+      const providerInitialized = await initializeProvider();
+      if (!providerInitialized) {
+        throw new Error('Cannot connect to blockchain network');
+      }
+      
+      // Try network check again
+      try {
+        if (isEthersV6) {
+          network = await provider.getNetwork();
+        } else {
+          network = await provider.getNetwork();
+        }
+        isConnectedToBlockchain = true;
+      } catch (retryErr) {
+        throw new Error('Cannot connect to blockchain network after retry');
+      }
     }
     
     // Get total hashrate from contract
