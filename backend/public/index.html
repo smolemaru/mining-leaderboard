@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BIGCOIN Mining Leaderboard API</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 40px 20px;
+      line-height: 1.6;
+      color: #333;
+      background-color: #f8f9fa;
+    }
+    h1 {
+      color: #f7931a;
+      border-bottom: 2px solid #eee;
+      padding-bottom: 10px;
+    }
+    h2 {
+      margin-top: 40px;
+      color: #555;
+    }
+    .endpoint {
+      background-color: #fff;
+      border-radius: 5px;
+      padding: 20px;
+      margin: 20px 0;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .endpoint h3 {
+      margin-top: 0;
+      color: #0066cc;
+    }
+    .method {
+      display: inline-block;
+      background-color: #28a745;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 14px;
+      margin-right: 10px;
+    }
+    code {
+      background-color: #f5f5f5;
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-family: Consolas, Monaco, 'Andale Mono', monospace;
+      font-size: 14px;
+    }
+    .response {
+      background-color: #f5f5f5;
+      padding: 15px;
+      border-radius: 5px;
+      overflow: auto;
+      font-family: Consolas, Monaco, 'Andale Mono', monospace;
+      font-size: 14px;
+    }
+    .button {
+      display: inline-block;
+      background-color: #0066cc;
+      color: white;
+      padding: 8px 16px;
+      text-decoration: none;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    .button:hover {
+      background-color: #0056b3;
+    }
+    .new-feature {
+      background-color: rgba(247, 147, 26, 0.1);
+      border-left: 4px solid #f7931a;
+      padding: 15px;
+      margin: 20px 0;
+      border-radius: 0 5px 5px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>BIGCOIN Mining Leaderboard API</h1>
+  
+  <p>Welcome to the BIGCOIN Mining Leaderboard API. This API provides access to blockchain mining statistics.</p>
+  
+  <div class="new-feature">
+    <h2>✨ New Feature: Game Room Integration</h2>
+    <p>The frontend now supports direct linking to a miner's game room using the format:</p>
+    <code>https://www.bigcoin.tech/room/0x123...abc</code>
+    <p>When a wallet address is provided in the URL, the miner will be highlighted in the leaderboard and their details will be automatically displayed.</p>
+    <p>Try the new frontend for the enhanced experience with game room integration.</p>
+  </div>
+  
+  <h2>Available Endpoints</h2>
+  
+  <div class="endpoint">
+    <span class="method">GET</span>
+    <h3>/api/leaderboard</h3>
+    <p>Returns the current miner leaderboard ordered by hashrate.</p>
+    <p><strong>Note:</strong> All hashrates are now displayed in GH/s (gigahashes per second) for consistency.</p>
+    <h4>Example response:</h4>
+    <pre class="response">{
+  "leaderboard": [
+    {
+      "address": "0x1234567890123456789012345678901234567890",
+      "hashrate": "5000000",
+      "hashrateNum": 5000000
+    },
+    {
+      "address": "0x2345678901234567890123456789012345678901",
+      "hashrate": "4500000",
+      "hashrateNum": 4500000
+    }
+  ],
+  "lastUpdate": "2023-05-15T12:34:56.789Z"
+}</pre>
+    <a href="/api/leaderboard" class="button">Try it</a>
+  </div>
+  
+  <div class="endpoint">
+    <span class="method">GET</span>
+    <h3>/api/health</h3>
+    <p>Returns the current API health status and blockchain connection info.</p>
+    <h4>Example response:</h4>
+    <pre class="response">{
+  "status": "ok",
+  "blockchain": "connected",
+  "contract": "0x09Ee83D8fA0f3F03f2aefad6a82353c1e5DE5705",
+  "miners": 26,
+  "lastUpdate": "2023-05-15T12:34:56.789Z"
+}</pre>
+    <a href="/api/health" class="button">Try it</a>
+  </div>
+  
+  <h2>Frontend Leaderboard</h2>
+  <p>To access the enhanced frontend mining leaderboard interface, open the file:</p>
+  <code>mining-leaderboard/frontend/index.html</code>
+  
+  <p>The frontend now includes:</p>
+  <ul>
+    <li>Miner detail view with a dedicated section showing more information</li>
+    <li>Direct links to game rooms for each miner</li>
+    <li>Highlighting of miners when their address is specified in the URL</li>
+    <li>Automatic scrolling to the relevant miner in the list</li>
+  </ul>
+  
+  <h2>Implementation Details</h2>
+  <p>This API reads blockchain data from the BIGCOIN contract and creates a leaderboard based on miner hashrates. If the blockchain connection fails, mock data is used as a fallback.</p>
+  
+  <h3>Game Room Integration</h3>
+  <p>The frontend supports direct linking to a miner's game room on the BIGCOIN platform. Game rooms can be accessed using:</p>
+  <code>https://www.bigcoin.tech/room/{wallet_address}</code>
+  
+  <p>Contract Address: <a href="https://abscan.org/address/0x09Ee83D8fA0f3F03f2aefad6a82353c1e5DE5705" target="_blank">0x09Ee83D8fA0f3F03f2aefad6a82353c1e5DE5705</a></p>
+  
+  <footer style="margin-top: 50px; text-align: center; color: #777; font-size: 14px;">
+    &copy; 2023 BIGCOIN - All rights reserved
+  </footer>
+  
+  <script>
+    // Add automatic refresh for API endpoint example responses
+    document.querySelectorAll('.button').forEach(button => {
+      button.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const url = button.getAttribute('href');
+        const responseContainer = button.parentElement.querySelector('.response');
+        
+        try {
+          responseContainer.textContent = 'Loading...';
+          const response = await fetch(url);
+          const data = await response.json();
+          responseContainer.textContent = JSON.stringify(data, null, 2);
+        } catch (err) {
+          responseContainer.textContent = `Error: ${err.message}`;
+        }
+      });
+    });
+  </script>
+</body>
+</html> 

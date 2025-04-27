@@ -1,0 +1,485 @@
+const express = require('express');
+const ethers = require('ethers');
+const cors = require('cors');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Enable CORS for all routes
+app.use(cors({
+  origin: '*', // Allow all origins
+  methods: ['GET', 'POST'], // Allow specific methods
+  allowedHeaders: ['Content-Type', 'Authorization'] // Allow specific headers
+}));
+app.use(express.json());
+
+// Serve static files from the public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Connect to blockchain provider
+const RPC_URL = 'https://api.mainnet.abs.xyz';
+let provider;
+let contract;
+let isConnectedToBlockchain = false;
+
+// Determine if we're using ethers v5 or v6
+const isEthersV6 = ethers.version && parseInt(ethers.version.split('.')[0]) >= 6;
+console.log(`Using ethers.js version: ${isEthersV6 ? 'v6+' : 'v5'}`);
+
+try {
+  // Initialize provider based on ethers version
+  if (isEthersV6) {
+    provider = new ethers.JsonRpcProvider(RPC_URL);
+  } else {
+    provider = new ethers.providers.JsonRpcProvider(RPC_URL);
+  }
+  console.log('Provider initialized');
+} catch (error) {
+  console.error('Error initializing provider:', error.message);
+  provider = null;
+}
+
+// Contract details
+const CONTRACT_ADDRESS = '0x09Ee83D8fA0f3F03f2aefad6a82353c1e5DE5705';
+const CONTRACT_ABI = [
+  // getTopMiners and getLeaderboard functions from original ABI
+  {"inputs":[{"internalType":"uint256","name":"count","type":"uint256"}],"name":"getTopMiners","outputs":[{"components":[{"internalType":"address","name":"miner","type":"address"},{"internalType":"uint256","name":"hashrate","type":"uint256"}],"internalType":"struct MiningLeaderboard.MinerInfo[]","name":"","type":"tuple[]"}],"stateMutability":"view","type":"function"},
+  {"inputs":[],"name":"getLeaderboard","outputs":[{"components":[{"internalType":"address","name":"miner","type":"address"},{"internalType":"uint256","name":"hashrate","type":"uint256"}],"internalType":"struct MiningLeaderboard.MinerInfo[]","name":"","type":"tuple[]"}],"stateMutability":"view","type":"function"},
+  
+  // Individual player data functions that might exist
+  {"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"playerHashrate","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[{"internalType":"address","name":"","type":"address"}],"name":"miners","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+  
+  // Total stats functions that might exist
+  {"inputs":[],"name":"totalHashrate","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+  {"inputs":[],"name":"uniqueMinerCount","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+  
+  // Mining related functions 
+  {"inputs":[],"name":"miningHasStarted","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
+  {"inputs":[],"name":"startBlock","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+  
+  // Events that might help us find miners
+  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"player","type":"address"},{"indexed":false,"internalType":"uint256","name":"playerHashrate","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"playerPendingRewards","type":"uint256"}],"name":"PlayerHashrateIncreased","type":"event"},
+  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"player","type":"address"},{"indexed":false,"internalType":"uint256","name":"playerHashrate","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"playerPendingRewards","type":"uint256"}],"name":"PlayerHashrateDecreased","type":"event"},
+  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"player","type":"address"},{"indexed":true,"internalType":"uint256","name":"minerIndex","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"cost","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"minerId","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"x","type":"uint256"},{"indexed":false,"internalType":"uint256","name":"y","type":"uint256"}],"name":"MinerBought","type":"event"},
+  {"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"player","type":"address"}],"name":"InitialFacilityPurchased","type":"event"}
+];
+
+// Initialize contract instance
+try {
+  if (provider) {
+    contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+    console.log('Contract initialized');
+  }
+} catch (error) {
+  console.error('Error initializing contract:', error.message);
+  contract = null;
+}
+
+// Leaderboard data
+let leaderboardData = {
+  leaderboard: [],
+  lastUpdate: null,
+  totalHashrate: "0"
+};
+
+// Mock data for local testing
+const mockLeaderboard = [
+  { address: '0x1234567890123456789012345678901234567890', hashrate: '5000000', hashrateNum: 5000000 },
+  { address: '0x2345678901234567890123456789012345678901', hashrate: '4500000', hashrateNum: 4500000 },
+  { address: '0x3456789012345678901234567890123456789012', hashrate: '4000000', hashrateNum: 4000000 },
+  { address: '0x4567890123456789012345678901234567890123', hashrate: '3500000', hashrateNum: 3500000 },
+  { address: '0x5678901234567890123456789012345678901234', hashrate: '3000000', hashrateNum: 3000000 },
+  { address: '0x6789012345678901234567890123456789012345', hashrate: '2500000', hashrateNum: 2500000 },
+  { address: '0x7890123456789012345678901234567890123456', hashrate: '2000000', hashrateNum: 2000000 },
+  { address: '0x8901234567890123456789012345678901234567', hashrate: '1500000', hashrateNum: 1500000 },
+  { address: '0x9012345678901234567890123456789012345678', hashrate: '1000000', hashrateNum: 1000000 },
+  { address: '0x0123456789012345678901234567890123456789', hashrate: '900000', hashrateNum: 900000 },
+];
+
+// Use mock data as initial data
+leaderboardData.leaderboard = [...mockLeaderboard];
+leaderboardData.lastUpdate = new Date().toISOString();
+console.log('Using mock data for initial load');
+
+// Function to update leaderboard from blockchain
+async function updateLeaderboard() {
+  try {
+    console.log('Updating leaderboard from blockchain...');
+    
+    if (!contract || !provider) {
+      throw new Error('Contract or provider not initialized');
+    }
+    
+    // Check if provider is connected
+    let network;
+    try {
+      if (isEthersV6) {
+        network = await provider.getNetwork();
+        console.log(`Connected to network: ${network.name || 'unknown'} (${network.chainId})`);
+      } else {
+        network = await provider.getNetwork();
+        console.log(`Connected to network chainId: ${network.chainId}`);
+      }
+      isConnectedToBlockchain = true;
+    } catch (err) {
+      console.error('Network check failed:', err.message);
+      throw new Error('Cannot connect to blockchain network');
+    }
+    
+    // Get total hashrate from contract
+    try {
+      const totalHashrate = await contract.totalHashrate();
+      console.log(`Total network hashrate from contract: ${totalHashrate.toString()}`);
+      leaderboardData.totalHashrate = totalHashrate.toString();
+    } catch (err) {
+      console.log(`Could not get totalHashrate from contract: ${err.message}`);
+      // Calculate total from individual hasrates as a fallback
+      leaderboardData.totalHashrate = "0";
+    }
+    
+    try {
+      // New approach: Find miners by scanning events
+      console.log('Scanning blockchain events to find miners...');
+      
+      // Get the most recent blocknumber
+      const latestBlock = await provider.getBlockNumber();
+      const fromBlock = Math.max(1, latestBlock - 4000000); // Look back ~4M blocks to ensure all miners are captured
+      
+      console.log(`Full scanning block range: ${fromBlock} to ${latestBlock} (total: ${latestBlock - fromBlock} blocks)`);
+      
+      // Find miner addresses from events - focus on InitialFacilityPurchased events first
+      const minerAddresses = new Set();
+      
+      // Function to handle paginated event scanning
+      async function scanEventsWithPagination(eventName, filter) {
+        if (!contract.filters[eventName]) {
+          console.log(`Filter for ${eventName} not available`);
+          return;
+        }
+        
+        try {
+          console.log(`Searching for events using filter: ${eventName}`);
+          
+          // Use a smaller chunk size to stay within provider limits
+          // Most RPC providers have a limit of 10,000 events per request
+          const CHUNK_SIZE = 100000; // 100k blocks per chunk
+          let eventsCount = 0;
+          
+          // Scan the blockchain in chunks
+          for (let chunkStart = fromBlock; chunkStart < latestBlock; chunkStart += CHUNK_SIZE) {
+            const chunkEnd = Math.min(chunkStart + CHUNK_SIZE - 1, latestBlock);
+            console.log(`Scanning ${eventName} events for block range: ${chunkStart} to ${chunkEnd}`);
+            
+            try {
+              const events = await contract.queryFilter(filter, chunkStart, chunkEnd);
+              eventsCount += events.length;
+              
+              // Extract addresses from events
+              events.forEach(event => {
+                // Different events have player/miner at different arg positions
+                const args = event.args || [];
+                
+                // Try to find all address-like arguments
+                if (args.player) {
+                  minerAddresses.add(args.player.toLowerCase());
+                }
+                // If we don't recognize the event but it has args
+                else if (args.length > 0) {
+                  // Try to find address-like arguments
+                  args.forEach(arg => {
+                    if (arg && typeof arg === 'string' && arg.startsWith('0x') && arg.length === 42) {
+                      minerAddresses.add(arg.toLowerCase());
+                    }
+                  });
+                }
+              });
+              
+              console.log(`Found ${events.length} ${eventName} events in this chunk. Total: ${eventsCount}`);
+              console.log(`Running total of unique addresses: ${minerAddresses.size}`);
+              
+            } catch (chunkErr) {
+              // If a chunk fails, log the error and try to reduce the chunk size
+              console.log(`Error scanning ${eventName} for block range ${chunkStart}-${chunkEnd}: ${chunkErr.message}`);
+              
+              // If the error mentions "Query returned more than 10000 results", try a smaller chunk
+              if (chunkErr.message.includes("more than 10000 results")) {
+                const smallerChunkSize = Math.floor(CHUNK_SIZE / 4);
+                console.log(`Reducing chunk size to ${smallerChunkSize} blocks and retrying...`);
+                
+                // Retry with smaller chunks
+                for (let smallChunkStart = chunkStart; smallChunkStart < chunkEnd; smallChunkStart += smallerChunkSize) {
+                  const smallChunkEnd = Math.min(smallChunkStart + smallerChunkSize - 1, chunkEnd);
+                  
+                  try {
+                    console.log(`Scanning with smaller chunk: ${smallChunkStart} to ${smallChunkEnd}`);
+                    const smallChunkEvents = await contract.queryFilter(filter, smallChunkStart, smallChunkEnd);
+                    eventsCount += smallChunkEvents.length;
+                    
+                    // Extract addresses
+                    smallChunkEvents.forEach(event => {
+                      const args = event.args || [];
+                      if (args.player) {
+                        minerAddresses.add(args.player.toLowerCase());
+                      } else if (args.length > 0) {
+                        args.forEach(arg => {
+                          if (arg && typeof arg === 'string' && arg.startsWith('0x') && arg.length === 42) {
+                            minerAddresses.add(arg.toLowerCase());
+                          }
+                        });
+                      }
+                    });
+                    
+                    console.log(`Found ${smallChunkEvents.length} ${eventName} events in smaller chunk. Total: ${eventsCount}`);
+                    
+                  } catch (smallChunkErr) {
+                    console.log(`Error in smaller chunk ${smallChunkStart}-${smallChunkEnd}: ${smallChunkErr.message}`);
+                    // Continue with the next small chunk even if this one failed
+                  }
+                }
+              }
+            }
+          }
+          
+          console.log(`Completed scanning for ${eventName}. Total events found: ${eventsCount}`);
+          
+        } catch (err) {
+          console.log(`Error setting up scan for ${eventName}: ${err.message}`);
+        }
+      }
+      
+      try {
+        // Only scan InitialFacilityPurchased event as it identifies all players who started the game
+        if (contract.filters.InitialFacilityPurchased) {
+          await scanEventsWithPagination('InitialFacilityPurchased', contract.filters.InitialFacilityPurchased());
+          console.log(`Found ${minerAddresses.size} unique addresses from InitialFacilityPurchased events`);
+        } else {
+          console.log(`Filter for InitialFacilityPurchased not available`);
+        }
+        
+        // Skip other event types since we only want to use InitialFacilityPurchased events
+        console.log(`Using only InitialFacilityPurchased events as requested`);
+        
+        console.log(`Found ${minerAddresses.size} unique addresses from InitialFacilityPurchased events`);
+        
+        if (minerAddresses.size === 0) {
+          throw new Error('Could not find any miner addresses from InitialFacilityPurchased events');
+        }
+        
+        // Get hashrate for each miner
+        const minerData = [];
+        
+        // Convert Set to Array for easier iteration
+        const addresses = Array.from(minerAddresses);
+        console.log(`Processing ${addresses.length} addresses...`);
+        
+        // Process addresses in batches to avoid rate limiting
+        const BATCH_SIZE = 20;
+        
+        for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
+          const batch = addresses.slice(i, i + BATCH_SIZE);
+          
+          // Process each address in the batch concurrently
+          const batchResults = await Promise.all(
+            batch.map(async (address) => {
+              try {
+                // Try playerHashrate() function first
+                try {
+                  const hashrate = await contract.playerHashrate(address);
+                  const hashrateNum = Number(hashrate.toString());
+                  
+                  // Include all miners who purchased initial facilities, even with zero hashrate
+                  return {
+                    address,
+                    hashrate: hashrate.toString(),
+                    hashrateNum
+                  };
+                } catch (err) {
+                  // If playerHashrate is not available, try miners mapping
+                  try {
+                    const hashrate = await contract.miners(address);
+                    const hashrateNum = Number(hashrate.toString());
+                    
+                    return {
+                      address,
+                      hashrate: hashrate.toString(),
+                      hashrateNum
+                    };
+                  } catch (minerErr) {
+                    // If both fail, check if they have initializedStarterFacility
+                    try {
+                      const hasInitialFacility = await contract.initializedStarterFacility(address);
+                      if (hasInitialFacility) {
+                        return {
+                          address,
+                          hashrate: '0',
+                          hashrateNum: 0
+                        };
+                      }
+                    } catch (facilityErr) {
+                      // If all checks fail, log and return null
+                      console.log(`Could not get data for ${address}`);
+                      return null;
+                    }
+                  }
+                }
+              } catch (err) {
+                console.log(`Error getting data for ${address}:`, err.message);
+              }
+              return null;
+            })
+          );
+          
+          // Filter out null results and add to minerData
+          minerData.push(...batchResults.filter(data => data !== null));
+          
+          console.log(`Processed batch ${i / BATCH_SIZE + 1}/${Math.ceil(addresses.length / BATCH_SIZE)}, found ${minerData.length} miners with data so far`);
+        }
+        
+        if (minerData.length === 0) {
+          throw new Error('No miners found');
+        }
+        
+        // If we calculated individual hashrates but couldn't get totalHashrate directly,
+        // calculate it from the sum of all miners
+        if (leaderboardData.totalHashrate === "0" && minerData.length > 0) {
+          const calculatedTotal = minerData.reduce((sum, miner) => sum + miner.hashrateNum, 0);
+          leaderboardData.totalHashrate = calculatedTotal.toString();
+          console.log(`Calculated total hashrate from miners: ${calculatedTotal} (fallback method)`);
+        }
+        
+        // Update the leaderboard with the found miners
+        leaderboardData.leaderboard = minerData;
+        
+      } catch (err) {
+        console.error('Error scanning for miners:', err.message);
+        throw err;
+      }
+      
+    } catch (err) {
+      console.error('Error processing blockchain data:', err.message);
+      throw err;
+    }
+    
+    // Sort by hashrate descending
+    leaderboardData.leaderboard.sort((a, b) => b.hashrateNum - a.hashrateNum);
+    
+    // Update timestamp
+    leaderboardData.lastUpdate = new Date().toISOString();
+    
+    console.log(`Leaderboard updated with ${leaderboardData.leaderboard.length} miners.`);
+  } catch (error) {
+    console.error('Error updating leaderboard:', error);
+    isConnectedToBlockchain = false;
+    
+    // If we don't have any data yet, use mock data
+    if (leaderboardData.leaderboard.length === 0) {
+      console.log('Using mock data as fallback');
+      leaderboardData.leaderboard = [...mockLeaderboard];
+      leaderboardData.lastUpdate = new Date().toISOString();
+    }
+  }
+}
+
+// Try to update the leaderboard, but don't block server start if it fails
+updateLeaderboard().catch(err => {
+  console.error('Initial leaderboard update failed:', err.message);
+  console.log('Server will continue with mock data');
+});
+
+// Update leaderboard every 2 minutes
+const REFRESH_INTERVAL = 2 * 60 * 1000; // 2 minutes in milliseconds
+setInterval(() => {
+  updateLeaderboard().catch(err => {
+    console.error('Scheduled leaderboard update failed:', err.message);
+  });
+}, REFRESH_INTERVAL);
+
+// API Routes
+
+// Root route - redirect to static HTML if not accessed programmatically
+app.get('/', (req, res) => {
+  // Check if request is from a browser (wants HTML) or programmatic (wants JSON)
+  const userAgent = req.headers['user-agent'] || '';
+  const acceptHeader = req.headers.accept || '';
+  
+  // If the request explicitly wants JSON or comes from a non-browser, send JSON
+  if (acceptHeader.includes('application/json') || !userAgent.includes('Mozilla')) {
+    res.json({
+      name: 'BIGCOIN Mining Leaderboard API',
+      description: 'API for retrieving miner leaderboard data',
+      endpoints: {
+        '/': 'This documentation',
+        '/api/leaderboard': 'Get the current leaderboard data',
+        '/api/health': 'Get API health status'
+      }
+    });
+  }
+  // Otherwise, the static middleware will serve index.html
+});
+
+app.get('/api/leaderboard', (req, res) => {
+  res.json(leaderboardData);
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+    contract: CONTRACT_ADDRESS,
+    miners: leaderboardData.leaderboard.length,
+    lastUpdate: leaderboardData.lastUpdate
+  });
+});
+
+// Route for simulating hashrate updates (for testing)
+app.post('/api/mock/update-hashrate', (req, res) => {
+  const { address, hashrate } = req.body;
+  
+  if (!address || !hashrate) {
+    return res.status(400).json({ success: false, message: 'Address and hashrate are required' });
+  }
+  
+  // Find the miner in the leaderboard
+  const existingMinerIndex = leaderboardData.leaderboard.findIndex(
+    miner => miner.address.toLowerCase() === address.toLowerCase()
+  );
+  
+  const hashrateNum = Number(hashrate);
+  
+  if (existingMinerIndex !== -1) {
+    // Update existing miner
+    leaderboardData.leaderboard[existingMinerIndex].hashrate = hashrate;
+    leaderboardData.leaderboard[existingMinerIndex].hashrateNum = hashrateNum;
+  } else {
+    // Add new miner
+    leaderboardData.leaderboard.push({
+      address,
+      hashrate,
+      hashrateNum
+    });
+  }
+  
+  // Re-sort the leaderboard
+  leaderboardData.leaderboard.sort((a, b) => b.hashrateNum - a.hashrateNum);
+  
+  // Update timestamp
+  leaderboardData.lastUpdate = new Date().toISOString();
+  
+  return res.json({
+    success: true,
+    message: 'Hashrate updated successfully'
+  });
+});
+
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Ready to serve leaderboard data at http://localhost:${PORT}/api/leaderboard`);
+  console.log(`Health check available at http://localhost:${PORT}/api/health`);
+});
+
+// Export the Express API for Vercel
+module.exports = app; 
