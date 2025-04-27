@@ -483,6 +483,46 @@
         width: 100%;
       }
     }
+    
+    .connection-status {
+      font-size: 0.8rem;
+    }
+    
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background-color: #6c757d;
+      transition: background-color 0.3s ease;
+    }
+    
+    .status-indicator.connected {
+      background-color: #28a745;
+    }
+    
+    .status-indicator.disconnected {
+      background-color: #dc3545;
+    }
+    
+    .rank-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      font-weight: bold;
+    }
+    
+    .copy-btn {
+      padding: 0.1rem 0.3rem;
+      opacity: 0.7;
+      transition: opacity 0.2s ease;
+    }
+    
+    .copy-btn:hover {
+      opacity: 1;
+    }
   </style>
 </head>
 <body>
@@ -499,9 +539,19 @@
           </div>
         </div>
         
-        <button id="refreshBtn" class="btn btn-primary">
-          <i class="bi bi-arrow-clockwise"></i> Refresh Data
-        </button>
+        <div class="connection-status d-flex align-items-center gap-3 ms-auto">
+          <div class="d-flex align-items-center">
+            <span class="me-2">Blockchain:</span>
+            <div id="blockchainStatus" class="status-indicator" title="Checking..."></div>
+          </div>
+          <div class="d-flex align-items-center">
+            <span class="me-2">Edge Config:</span>
+            <div id="edgeConfigStatus" class="status-indicator" title="Checking..."></div>
+          </div>
+          <button id="refreshButton" class="btn btn-sm btn-outline-light ms-3">
+            <i class="bi bi-arrow-clockwise"></i> Refresh
+          </button>
+        </div>
       </div>
       
       <div id="totalHashrateDisplay" class="network-stats" style="display: none;">
@@ -579,15 +629,15 @@
         </div>
       </div>
       <div class="card-body p-0">
-        <div id="loadingIndicator" class="loading-container">
-          <div class="spinner-border loading-spinner" role="status">
+        <div id="loadingIndicator" class="text-center p-4" style="display: flex; justify-content: center; align-items: center; height: 200px;">
+          <div class="spinner-border text-primary" role="status">
             <span class="visually-hidden">Loading...</span>
           </div>
-          <p>Loading leaderboard data...</p>
+          <span class="ms-3">Loading leaderboard data...</span>
         </div>
         
-        <div id="errorContainer" class="error-container" style="display: none;">
-          Could not connect to server. Please try again later.
+        <div id="errorMessage" class="alert alert-danger" style="display: none;">
+          Could not load leaderboard data. Please try again later.
         </div>
         
         <div id="leaderboardContainer" style="display: none;">
@@ -622,273 +672,84 @@
   </div>
 
   <script>
-    // Fix API URL construction for file:// protocol
-    const isFileProtocol = window.location.protocol === 'file:';
-    const API_URL = isFileProtocol 
-      ? 'http://localhost:3000/api/leaderboard'
-      : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-          ? 'http://localhost:3000/api/leaderboard'
-          : `${window.location.protocol}//${window.location.hostname}:3000/api/leaderboard`);
-    
-    // Configuration for game room URL format
-    const GAME_ROOM_BASE_URL = 'https://www.bigcoin.tech/room/';
-    // Configuration for Abstract profile URL format
-    const ABSTRACT_PROFILE_BASE_URL = 'https://portal.abs.xyz/profile/';
-    
-    console.log('Using API URL:', API_URL);
-    
-    // Global data for reference
-    let leaderboardData = null;
-    let filteredMiners = [];
-    
-    // DOM elements
-    const leaderboardTable = document.getElementById('leaderboardTable');
-    const loadingIndicator = document.getElementById('loadingIndicator');
-    const leaderboardContainer = document.getElementById('leaderboardContainer');
-    const errorContainer = document.getElementById('errorContainer');
-    const lastUpdateText = document.getElementById('lastUpdateText');
-    const lastUpdateTime = document.getElementById('lastUpdateTime');
-    const minersCount = document.getElementById('minersCount');
-    const refreshBtn = document.getElementById('refreshBtn');
-    const minerDetails = document.getElementById('minerDetails');
-    const minerDetailsTitle = document.getElementById('minerDetailsTitle');
-    const minerDetailsAddress = document.getElementById('minerDetailsAddress');
-    const minerDetailsHashrate = document.getElementById('minerDetailsHashrate');
-    const minerDetailsRank = document.getElementById('minerDetailsRank');
-    const minerDetailsPercentage = document.getElementById('minerDetailsPercentage');
-    const minerDetailsExplorer = document.getElementById('minerDetailsExplorer');
-    const minerDetailsGameRoom = document.getElementById('minerDetailsGameRoom');
-    const minerDetailsAbstractProfile = document.getElementById('minerDetailsAbstractProfile');
-    
-    // Add reference to totalHashrate DOM elements
-    const totalHashrateDisplay = document.getElementById('totalHashrateDisplay');
-    const totalHashrateValue = document.getElementById('totalHashrateValue');
-    const totalMinersValue = document.getElementById('totalMinersValue');
-    
-    // Search elements
-    const searchInput = document.getElementById('searchInput');
-    const searchBtn = document.getElementById('searchBtn');
-    
-    // Close details button
-    const closeDetailsBtn = document.getElementById('closeDetails');
-    
-    // Check if we have a wallet address in the URL (for direct linking to a miner)
-    let targetWalletAddress = null;
-    const pathParts = window.location.pathname.split('/');
-    if (pathParts.length > 1) {
-      const lastSegment = pathParts[pathParts.length - 1];
-      if (lastSegment && lastSegment.startsWith('0x') && lastSegment.length === 42) {
-        targetWalletAddress = lastSegment.toLowerCase();
-        console.log('Target wallet address found in URL:', targetWalletAddress);
+    // Global variables for the app
+    let isLoading = true;
+    let loadingTimeout;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY = 5000; // 5 seconds
+    const REQUEST_TIMEOUT = 10000; // 10 seconds
+
+    // Show loading state in the UI
+    function showLoading() {
+      isLoading = true;
+      document.getElementById('loadingIndicator').style.display = 'flex';
+      document.getElementById('leaderboardTable').style.display = 'none';
+      document.getElementById('errorMessage').style.display = 'none';
+    }
+
+    // Show error state in the UI
+    function showError(message) {
+      isLoading = false;
+      document.getElementById('loadingIndicator').style.display = 'none';
+      document.getElementById('leaderboardTable').style.display = 'none';
+      document.getElementById('errorMessage').style.display = 'block';
+      document.getElementById('errorMessage').innerText = message || 'Could not load leaderboard data. Please try again later.';
+    }
+
+    // Show leaderboard data in the UI
+    function showLeaderboard() {
+      isLoading = false;
+      document.getElementById('loadingIndicator').style.display = 'none';
+      document.getElementById('leaderboardTable').style.display = 'table';
+      document.getElementById('errorMessage').style.display = 'none';
+    }
+
+    // Format hashrate with proper units
+    function formatHashrate(hashrateStr) {
+      const hashrate = parseInt(hashrateStr);
+      
+      if (hashrate >= 1000000) {
+        return `${(hashrate / 1000000).toFixed(2)} MH/s`;
+      } else if (hashrate >= 1000) {
+        return `${(hashrate / 1000).toFixed(2)} kH/s`;
+      } else {
+        return `${hashrate} H/s`;
       }
     }
-    
-    // URL hash can also be used for wallet address
-    if (!targetWalletAddress && window.location.hash) {
-      const hashAddress = window.location.hash.substring(1);
-      if (hashAddress.startsWith('0x') && hashAddress.length === 42) {
-        targetWalletAddress = hashAddress.toLowerCase();
-        console.log('Target wallet address found in hash:', targetWalletAddress);
-      }
-    }
-    
-    // Helper function to format hashrates with proper units
-    function formatHashrate(hashrate) {
-      // Return the raw hashrate without formatting
-      return hashrate;
-    }
-    
-    // Helper function to format addresses for display
+
+    // Format address for display
     function formatAddress(address) {
       if (!address) return '';
-      const start = address.substring(0, 6);
-      const end = address.substring(address.length - 4);
-      return `${start}...${end}`;
+      return address.substring(0, 6) + '...' + address.substring(address.length - 4);
     }
-    
-    // Helper function to format dates
-    function formatDate(dateString) {
-      if (!dateString) return 'Never';
+
+    // Fetch leaderboard data with timeout and retry logic
+    async function fetchLeaderboardData() {
+      showLoading();
       
-      const date = new Date(dateString);
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    }
-    
-    // Function to show detailed information for a miner
-    function showMinerDetails(miner, rank) {
-      minerDetailsTitle.textContent = `Miner Details`;
-      minerDetailsAddress.textContent = miner.address;
-      minerDetailsHashrate.textContent = formatHashrate(miner.hashrate);
-      minerDetailsRank.textContent = `#${rank}`;
-      
-      // Add hashrate percentage to details
-      const totalHashrateNum = Number(leaderboardData.totalHashrate || '0');
-      const percentage = totalHashrateNum > 0 
-        ? ((miner.hashrateNum / totalHashrateNum) * 100).toFixed(4)
-        : '0.0000';
-      minerDetailsPercentage.textContent = `${percentage}%`;
-      
-      // Set up links
-      minerDetailsExplorer.href = `https://abscan.org/address/${miner.address}`;
-      minerDetailsGameRoom.href = `${GAME_ROOM_BASE_URL}${miner.address}`;
-      minerDetailsAbstractProfile.href = `${ABSTRACT_PROFILE_BASE_URL}${miner.address}`;
-      
-      // Show the details section
-      minerDetails.style.display = 'block';
-      
-      // Scroll to details if needed
-      minerDetails.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    
-    // Function to filter miners based on search input
-    function filterMiners(searchTerm) {
-      if (!leaderboardData || !leaderboardData.leaderboard) return [];
-      
-      // Filter out zero hashrate miners
-      const activeMiners = leaderboardData.leaderboard.filter(miner => miner.hashrateNum > 0);
-      
-      if (!searchTerm) return activeMiners;
-      
-      const search = searchTerm.toLowerCase();
-      return activeMiners.filter(miner => 
-        miner.address.toLowerCase().includes(search)
-      );
-    }
-    
-    // Function to render the leaderboard table with current data
-    function renderLeaderboard() {
-      if (!leaderboardData) return;
-      
-      leaderboardTable.innerHTML = '';
-      
-      // Filter out zero hashrate miners for display but keep count of total
-      const totalMiners = leaderboardData.leaderboard.length;
-      const searchTerm = searchInput.value.trim();
-      filteredMiners = filterMiners(searchTerm);
-      
-      // Update miners count text
-      if (searchTerm) {
-        minersCount.textContent = `Found ${filteredMiners.length} miners matching "${searchTerm}" (Total registered: ${totalMiners})`;
-      } else {
-        minersCount.textContent = `Showing ${filteredMiners.length} active miners (Total registered: ${totalMiners})`;
+      // Clear any previous timeout
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout);
       }
       
-      // Update total miners value
-      totalMinersValue.textContent = totalMiners;
-      
-      // Track if we found our target wallet
-      let foundTargetWallet = false;
-      let targetWalletMiner = null;
-      let targetWalletRank = 0;
-      
-      // Use totalHashrate for percentage calculation
-      const totalHashrateNum = Number(leaderboardData.totalHashrate || '0');
-      
-      filteredMiners.forEach((miner, index) => {
-        const row = document.createElement('tr');
-        const isTargetWallet = targetWalletAddress && miner.address.toLowerCase() === targetWalletAddress;
-        
-        // Calculate percentage of total network
-        const percentage = totalHashrateNum > 0 
-          ? ((miner.hashrateNum / totalHashrateNum) * 100).toFixed(4)
-          : '0.0000';
-        
-        // Mark if this is our target wallet
-        if (isTargetWallet) {
-          row.classList.add('highlighted-miner');
-          foundTargetWallet = true;
-          targetWalletMiner = miner;
-          targetWalletRank = index + 1;
-        }
-        
-        let rankHtml = '';
-        if (index === 0) {
-          rankHtml = `<span class="rank-badge rank-1">1</span>`;
-        } else if (index === 1) {
-          rankHtml = `<span class="rank-badge rank-2">2</span>`;
-        } else if (index === 2) {
-          rankHtml = `<span class="rank-badge rank-3">3</span>`;
+      // Set new timeout for the request
+      loadingTimeout = setTimeout(() => {
+        console.warn('Leaderboard data request timed out');
+        if (retryCount < MAX_RETRIES) {
+          retryCount++;
+          console.log(`Retrying (${retryCount}/${MAX_RETRIES})...`);
+          fetchLeaderboardData();
         } else {
-          rankHtml = `<span class="rank-badge rank-other">${index + 1}</span>`;
+          showError('Request timed out. Please check your connection and try again.');
         }
-        
-        row.innerHTML = `
-          <td>${rankHtml}</td>
-          <td>
-            <a href="https://abscan.org/address/${miner.address}" target="_blank" class="address-link">
-              ${formatAddress(miner.address)}
-              <i class="bi bi-box-arrow-up-right"></i>
-            </a>
-          </td>
-          <td>${formatHashrate(miner.hashrate)}</td>
-          <td><span class="network-percentage">${percentage}%</span></td>
-          <td class="actions-cell">
-            <button class="btn btn-custom btn-sm view-details" data-index="${index}">
-              <i class="bi bi-info-circle"></i> Details
-            </button>
-            <a href="${GAME_ROOM_BASE_URL}${miner.address}" target="_blank" class="btn btn-primary btn-sm">
-              <i class="bi bi-controller"></i> Game Room
-            </a>
-            <a href="${ABSTRACT_PROFILE_BASE_URL}${miner.address}" target="_blank" class="btn btn-primary btn-sm">
-              <i class="bi bi-person-badge"></i> Abstract Profile
-            </a>
-          </td>
-        `;
-        
-        leaderboardTable.appendChild(row);
-      });
+      }, REQUEST_TIMEOUT);
       
-      // If no miners found after filtering
-      if (filteredMiners.length === 0) {
-        const emptyRow = document.createElement('tr');
-        emptyRow.innerHTML = `
-          <td colspan="5" class="text-center py-4">
-            <i class="bi bi-exclamation-circle text-muted me-2"></i>
-            ${searchTerm ? 'No miners found matching your search.' : 'No active miners found.'}
-          </td>
-        `;
-        leaderboardTable.appendChild(emptyRow);
-      }
-      
-      // Add event listeners to the Details buttons
-      document.querySelectorAll('.view-details').forEach(button => {
-        button.addEventListener('click', () => {
-          const index = parseInt(button.getAttribute('data-index'));
-          showMinerDetails(filteredMiners[index], index + 1);
-        });
-      });
-      
-      // Show details for target wallet automatically if found
-      if (foundTargetWallet && targetWalletMiner) {
-        showMinerDetails(targetWalletMiner, targetWalletRank);
-        
-        // Also scroll to the highlighted row in the table
-        setTimeout(() => {
-          const highlightedRow = document.querySelector('.highlighted-miner');
-          if (highlightedRow) {
-            highlightedRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-        }, 500);
-      }
-    }
-    
-    // Function to fetch leaderboard data from the API
-    async function fetchLeaderboard() {
       try {
-        loadingIndicator.style.display = 'flex';
-        leaderboardContainer.style.display = 'none';
-        errorContainer.style.display = 'none';
+        const response = await fetch('/api/leaderboard');
         
-        // Don't hide miner details when refreshing
-        
-        const response = await fetch(API_URL, {
-          method: 'GET',
-          headers: {
-            'Accept': 'application/json',
-          },
-          // Add a reasonable timeout to avoid waiting too long
-          signal: AbortSignal.timeout(10000) // 10 seconds timeout
-        });
+        // Clear timeout as we got a response
+        clearTimeout(loadingTimeout);
         
         if (!response.ok) {
           throw new Error(`Server responded with status: ${response.status}`);
@@ -896,133 +757,227 @@
         
         const data = await response.json();
         
-        // Store data globally for reference
-        leaderboardData = data;
+        // Update the leaderboard UI
+        updateLeaderboard(data);
+        showLeaderboard();
         
-        // Display total network hashrate from smart contract
-        if (data.totalHashrate) {
-          totalHashrateValue.textContent = data.totalHashrate + " (Direct from Smart Contract)";
-          totalHashrateDisplay.style.display = 'flex';
-        } else {
-          totalHashrateDisplay.style.display = 'none';
+        // Reset retry count on success
+        retryCount = 0;
+        
+        // Update last update time
+        if (data.lastUpdate) {
+          updateLastUpdateTime(data.lastUpdate);
         }
         
-        // Render the leaderboard
-        renderLeaderboard();
-        
-        // Update timestamps
-        lastUpdateText.textContent = `Last updated: ${formatDate(data.lastUpdate)}`;
-        lastUpdateTime.textContent = formatDate(data.lastUpdate);
-        
-        loadingIndicator.style.display = 'none';
-        leaderboardContainer.style.display = 'block';
+        // Update total hashrate
+        if (data.totalHashrate) {
+          updateTotalHashrate(data.totalHashrate);
+        }
         
       } catch (error) {
-        console.error('Error fetching leaderboard:', error);
-        loadingIndicator.style.display = 'none';
-        errorContainer.style.display = 'block';
-        errorContainer.textContent = `Could not load leaderboard data: ${error.message}`;
+        // Clear timeout as we got an error
+        clearTimeout(loadingTimeout);
         
-        // Show options for user to either retry or load mock data
-        const buttonContainer = document.createElement('div');
-        buttonContainer.className = 'mt-3';
+        console.error('Error fetching leaderboard data:', error);
         
-        const retryButton = document.createElement('button');
-        retryButton.className = 'btn btn-custom me-2';
-        retryButton.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Retry connection';
-        retryButton.onclick = fetchLeaderboard;
-        
-        const mockDataButton = document.createElement('button');
-        mockDataButton.className = 'btn btn-custom';
-        mockDataButton.innerHTML = '<i class="bi bi-database"></i> Use mock data';
-        mockDataButton.onclick = loadMockData;
-        
-        buttonContainer.appendChild(retryButton);
-        buttonContainer.appendChild(mockDataButton);
-        
-        errorContainer.appendChild(document.createElement('br'));
-        errorContainer.appendChild(buttonContainer);
+        if (retryCount < MAX_RETRIES) {
+          retryCount++;
+          console.log(`Retrying (${retryCount}/${MAX_RETRIES})...`);
+          
+          // Wait before retrying
+          setTimeout(() => {
+            fetchLeaderboardData();
+          }, RETRY_DELAY);
+        } else {
+          showError(`Could not load leaderboard data: ${error.message}`);
+        }
       }
     }
-    
-    // Function to load mock data when backend is unavailable
-    function loadMockData() {
-      const mockData = {
-        leaderboard: [
-          { address: '0x1234567890123456789012345678901234567890', hashrate: '5000000', hashrateNum: 5000000 },
-          { address: '0x2345678901234567890123456789012345678901', hashrate: '4500000', hashrateNum: 4500000 },
-          { address: '0x3456789012345678901234567890123456789012', hashrate: '4000000', hashrateNum: 4000000 },
-          { address: '0x4567890123456789012345678901234567890123', hashrate: '3500000', hashrateNum: 3500000 },
-          { address: '0x5678901234567890123456789012345678901234', hashrate: '3000000', hashrateNum: 3000000 },
-          { address: '0x6789012345678901234567890123456789012345', hashrate: '2500000', hashrateNum: 2500000 },
-          { address: '0x7890123456789012345678901234567890123456', hashrate: '2000000', hashrateNum: 2000000 },
-          { address: '0x8901234567890123456789012345678901234567', hashrate: '1500000', hashrateNum: 1500000 },
-          { address: '0x9012345678901234567890123456789012345678', hashrate: '1000000', hashrateNum: 1000000 },
-          { address: '0x0123456789012345678901234567890123456789', hashrate: '900000', hashrateNum: 900000 }
-        ],
-        lastUpdate: new Date().toISOString(),
-        totalHashrate: "25000000"
-      };
+
+    // Update the leaderboard table with data
+    function updateLeaderboard(data) {
+      const tableBody = document.querySelector('#leaderboardTable tbody');
+      tableBody.innerHTML = '';
       
-      // If we have a target wallet but it's not in our mock data, add it
-      if (targetWalletAddress && !mockData.leaderboard.some(m => m.address.toLowerCase() === targetWalletAddress)) {
-        mockData.leaderboard.push({
-          address: targetWalletAddress,
-          hashrate: '750000',
-          hashrateNum: 750000
+      if (!data || !data.leaderboard || data.leaderboard.length === 0) {
+        showError('No leaderboard data available.');
+        return;
+      }
+      
+      data.leaderboard.forEach((miner, index) => {
+        const row = document.createElement('tr');
+        
+        // Create rank cell with appropriate styling
+        const rankCell = document.createElement('td');
+        const rankBadge = document.createElement('div');
+        rankBadge.className = 'rank-badge';
+        
+        // Special styling for top 3
+        if (index === 0) {
+          rankBadge.classList.add('rank-first');
+          rankBadge.style.backgroundColor = 'rgba(255, 215, 0, 0.2)';
+          rankBadge.style.color = '#ffd700';
+          rankBadge.style.border = '1px solid #ffd700';
+        } else if (index === 1) {
+          rankBadge.classList.add('rank-second');
+          rankBadge.style.backgroundColor = 'rgba(192, 192, 192, 0.2)';
+          rankBadge.style.color = '#c0c0c0';
+          rankBadge.style.border = '1px solid #c0c0c0';
+        } else if (index === 2) {
+          rankBadge.classList.add('rank-third');
+          rankBadge.style.backgroundColor = 'rgba(205, 127, 50, 0.2)';
+          rankBadge.style.color = '#cd7f32';
+          rankBadge.style.border = '1px solid #cd7f32';
+        } else {
+          rankBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+          rankBadge.style.color = '#94a3b8';
+          rankBadge.style.border = '1px solid #475569';
+        }
+        
+        rankBadge.textContent = index + 1;
+        rankCell.appendChild(rankBadge);
+        row.appendChild(rankCell);
+        
+        // Create address cell
+        const addressCell = document.createElement('td');
+        const addressText = document.createElement('div');
+        addressText.className = 'address';
+        addressText.style.fontFamily = 'monospace';
+        addressText.textContent = formatAddress(miner.address);
+        
+        // Add copy button
+        const copyButton = document.createElement('button');
+        copyButton.className = 'btn btn-sm btn-custom copy-btn';
+        copyButton.innerHTML = '<i class="bi bi-clipboard"></i>';
+        copyButton.setAttribute('data-address', miner.address);
+        copyButton.addEventListener('click', function() {
+          copyToClipboard(miner.address);
+          this.innerHTML = '<i class="bi bi-clipboard-check"></i>';
+          setTimeout(() => {
+            this.innerHTML = '<i class="bi bi-clipboard"></i>';
+          }, 2000);
         });
-        // Re-sort the data
-        mockData.leaderboard.sort((a, b) => b.hashrateNum - a.hashrateNum);
-      }
-      
-      // Store data globally
-      leaderboardData = mockData;
-      
-      // Display total network hashrate
-      totalHashrateValue.textContent = mockData.totalHashrate + " (Direct from Smart Contract)";
-      totalHashrateDisplay.style.display = 'flex';
-      
-      // Render the leaderboard
-      renderLeaderboard();
-      
-      // Update timestamps
-      lastUpdateText.textContent = `Last updated: ${formatDate(mockData.lastUpdate)}`;
-      lastUpdateTime.textContent = formatDate(mockData.lastUpdate);
-      
-      loadingIndicator.style.display = 'none';
-      leaderboardContainer.style.display = 'block';
-      
-      // Show message that mock data is being used
-      const mockIndicator = document.createElement('div');
-      mockIndicator.className = 'alert alert-warning mt-3 mx-3';
-      mockIndicator.innerHTML = '<i class="bi bi-exclamation-triangle-fill me-2"></i> Using mock data. Backend server is unavailable.';
-      document.querySelector('.card-body').appendChild(mockIndicator);
+        
+        const addressWrapper = document.createElement('div');
+        addressWrapper.className = 'd-flex align-items-center gap-2';
+        addressWrapper.appendChild(addressText);
+        addressWrapper.appendChild(copyButton);
+        addressCell.appendChild(addressWrapper);
+        row.appendChild(addressCell);
+        
+        // Create hashrate cell
+        const hashrateCell = document.createElement('td');
+        hashrateCell.className = 'text-end';
+        hashrateCell.innerHTML = `<span class="highlight">${formatHashrate(miner.hashrate)}</span>`;
+        row.appendChild(hashrateCell);
+        
+        // Create percentage cell
+        const totalHashrate = parseInt(data.totalHashrate || '0');
+        const percentage = totalHashrate > 0 ? (parseInt(miner.hashrate) / totalHashrate * 100).toFixed(2) : 0;
+        
+        const percentageCell = document.createElement('td');
+        percentageCell.className = 'text-end';
+        percentageCell.textContent = `${percentage}%`;
+        row.appendChild(percentageCell);
+        
+        // Add the row to the table
+        tableBody.appendChild(row);
+      });
     }
-    
-    // Add event listener to the refresh button
-    refreshBtn.addEventListener('click', fetchLeaderboard);
-    
-    // Add event listener to search form
-    searchBtn.addEventListener('click', () => {
-      renderLeaderboard();
-    });
-    
-    searchInput.addEventListener('keyup', (e) => {
-      if (e.key === 'Enter') {
-        renderLeaderboard();
+
+    // Update the last update time in the UI
+    function updateLastUpdateTime(timestamp) {
+      try {
+        const lastUpdateElement = document.getElementById('lastUpdateTime');
+        if (lastUpdateElement) {
+          const date = new Date(timestamp);
+          lastUpdateElement.textContent = date.toLocaleString();
+        }
+      } catch (error) {
+        console.error('Error updating last update time:', error);
       }
+    }
+
+    // Update total hashrate in the UI
+    function updateTotalHashrate(totalHashrate) {
+      try {
+        const totalHashrateElement = document.getElementById('totalHashrateValue');
+        if (totalHashrateElement) {
+          totalHashrateElement.textContent = formatHashrate(totalHashrate);
+        }
+      } catch (error) {
+        console.error('Error updating total hashrate:', error);
+      }
+    }
+
+    // Copy text to clipboard
+    function copyToClipboard(text) {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+    }
+
+    // Check the health of the API
+    async function checkApiHealth() {
+      try {
+        const response = await fetch('/api/health');
+        const data = await response.json();
+        
+        // Update connection status indicators
+        updateConnectionStatus('blockchainStatus', data.blockchain === 'connected');
+        updateConnectionStatus('edgeConfigStatus', data.edgeConfig === 'available');
+        
+        console.log('API Health:', data);
+        return data;
+      } catch (error) {
+        console.error('Error checking API health:', error);
+        
+        // Update connection status indicators to disconnected
+        updateConnectionStatus('blockchainStatus', false);
+        updateConnectionStatus('edgeConfigStatus', false);
+        
+        return null;
+      }
+    }
+
+    // Update connection status indicator
+    function updateConnectionStatus(elementId, isConnected) {
+      const element = document.getElementById(elementId);
+      if (element) {
+        if (isConnected) {
+          element.className = 'status-indicator connected';
+          element.setAttribute('title', 'Connected');
+        } else {
+          element.className = 'status-indicator disconnected';
+          element.setAttribute('title', 'Disconnected');
+        }
+      }
+    }
+
+    // Refresh the data
+    function refreshData() {
+      fetchLeaderboardData();
+      checkApiHealth();
+    }
+
+    // Initial fetch and setup
+    document.addEventListener('DOMContentLoaded', function() {
+      // Initial data load
+      fetchLeaderboardData();
+      checkApiHealth();
+      
+      // Set up refresh button
+      const refreshButton = document.getElementById('refreshButton');
+      if (refreshButton) {
+        refreshButton.addEventListener('click', refreshData);
+      }
+      
+      // Set up auto-refresh (every 60 seconds)
+      setInterval(refreshData, 60000);
     });
-    
-    // Add event listener to close details button
-    closeDetailsBtn.addEventListener('click', () => {
-      minerDetails.style.display = 'none';
-    });
-    
-    // Initial fetch of leaderboard data
-    fetchLeaderboard();
-    
-    // Set up auto-refresh every 2 minutes
-    setInterval(fetchLeaderboard, 2 * 60 * 1000);
   </script>
 </body>
 </html> 
