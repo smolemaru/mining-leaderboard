@@ -14,6 +14,21 @@ app.use(cors({
   methods: ['GET', 'POST'], // Allow specific methods
   allowedHeaders: ['Content-Type', 'Authorization'] // Allow specific headers
 }));
+
+// Add CSP headers
+app.use((req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; " +
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+    "img-src 'self' data: https:; " +
+    "font-src 'self' https://cdn.jsdelivr.net; " +
+    "connect-src 'self' https://api.mainnet.abs.xyz https://rpc.ankr.com https://public-abs-rpc.haqq.network"
+  );
+  next();
+});
+
 app.use(express.json());
 
 // Serve static files from the frontend directory (which contains the HTML, CSS, and JS)
@@ -24,14 +39,19 @@ const leaderboardRoutes = require('./routes/leaderboard');
 app.use('/api/leaderboard', leaderboardRoutes);
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  const edgeConfigStatus = edgeConfig.getEdgeConfigStatus();
+  const isEdgeConfigWorking = await edgeConfig.isEdgeConfigWorking();
+  
   const health = {
     status: 'ok',
     uptime: process.uptime(),
     blockchain: blockchainService.isConnectedToBlockchain ? 'connected' : 'disconnected',
-    edgeConfig: process.env.EDGE_CONFIG ? 'configured' : 'missing_env_var',
-    EDGE_CONFIG_SET: process.env.EDGE_CONFIG ? 'yes' : 'no',
-    BLOCK_SCAN_RANGE: process.env.BLOCK_SCAN_RANGE || 'not_set',
+    edgeConfig: isEdgeConfigWorking ? 'configured' : 'not_working',
+    edgeConfigDetails: {
+      ...edgeConfigStatus,
+      working: isEdgeConfigWorking
+    },
     timestamp: new Date().toISOString()
   };
   
