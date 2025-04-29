@@ -6,7 +6,6 @@
  */
 
 const ethers = require('ethers');
-const edgeConfig = require('../edge-config');
 const fs = require('fs');
 const path = require('path');
 

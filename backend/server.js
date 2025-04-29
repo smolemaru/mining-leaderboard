@@ -2,7 +2,6 @@ const express = require('express');
 const ethers = require('ethers');
 const cors = require('cors');
 const path = require('path');
-const edgeConfig = require('./edge-config');
 const blockchainService = require('./services/blockchain');
 
 const app = express();
@@ -31,7 +30,7 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// Serve static files from the frontend directory (which contains the HTML, CSS, and JS)
+// Serve static files from the frontend directory
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // Import and use API routes
@@ -40,18 +39,10 @@ app.use('/api/leaderboard', leaderboardRoutes);
 
 // Health check endpoint
 app.get('/api/health', async (req, res) => {
-  const edgeConfigStatus = edgeConfig.getEdgeConfigStatus();
-  const isEdgeConfigWorking = await edgeConfig.isEdgeConfigWorking();
-  
   const health = {
     status: 'ok',
     uptime: process.uptime(),
     blockchain: blockchainService.isConnectedToBlockchain ? 'connected' : 'disconnected',
-    edgeConfig: isEdgeConfigWorking ? 'configured' : 'not_working',
-    edgeConfigDetails: {
-      ...edgeConfigStatus,
-      working: isEdgeConfigWorking
-    },
     timestamp: new Date().toISOString()
   };
   
@@ -160,5 +151,5 @@ app.listen(PORT, () => {
   console.log(`Health check available at http://localhost:${PORT}/api/health`);
 });
 
-// Export the Express API for Vercel
+// Export the Express API
 module.exports = app; 

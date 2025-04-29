@@ -2,10 +2,33 @@ const { updateLeaderboard } = require('./services/blockchain');
 const fs = require('fs').promises;
 const path = require('path');
 
+async function waitForBlockchainConnection(maxAttempts = 5) {
+    const blockchain = require('./services/blockchain');
+    let attempts = 0;
+    
+    while (attempts < maxAttempts) {
+        if (blockchain.isConnectedToBlockchain) {
+            console.log('Successfully connected to blockchain');
+            return true;
+        }
+        console.log(`Waiting for blockchain connection... (attempt ${attempts + 1}/${maxAttempts})`);
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+        attempts++;
+    }
+    
+    return false;
+}
+
 async function generateStaticData() {
     console.log('Generating static leaderboard data...');
     
     try {
+        // Wait for blockchain connection
+        const isConnected = await waitForBlockchainConnection();
+        if (!isConnected) {
+            throw new Error('Failed to connect to blockchain after multiple attempts');
+        }
+
         // Get leaderboard data
         const result = await updateLeaderboard(true);
         
