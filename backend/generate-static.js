@@ -1,13 +1,14 @@
-const { updateLeaderboard } = require('./services/blockchain');
+const blockchainService = require('./services/blockchain');
 const fs = require('fs').promises;
 const path = require('path');
 
 async function waitForBlockchainConnection(maxAttempts = 5) {
-    const blockchain = require('./services/blockchain');
-    let attempts = 0;
+    // First ensure blockchain service is initialized
+    await blockchainService.initialize();
     
+    let attempts = 0;
     while (attempts < maxAttempts) {
-        if (blockchain.isConnectedToBlockchain) {
+        if (blockchainService.isConnectedToBlockchain) {
             console.log('Successfully connected to blockchain');
             return true;
         }
@@ -29,8 +30,9 @@ async function generateStaticData() {
             throw new Error('Failed to connect to blockchain after multiple attempts');
         }
 
-        // Get leaderboard data
-        const result = await updateLeaderboard(true);
+        // Force a new update of the leaderboard
+        console.log('Forcing a fresh leaderboard update...');
+        const result = await blockchainService.updateLeaderboard(true);
         
         if (!result.success) {
             throw new Error(result.error || 'Failed to update leaderboard');
@@ -38,11 +40,16 @@ async function generateStaticData() {
 
         const data = result.data;
         
-        // Add timestamp
+        // Add timestamp and metadata
         const staticData = {
             ...data,
             generatedAt: new Date().toISOString(),
-            nextUpdateAfter: new Date(Date.now() + 60 * 60 * 1000).toISOString() // 1 hour from now
+            nextUpdateAfter: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour from now
+            metadata: {
+                totalMiners: data.miners?.length || 0,
+                lastScannedBlock: data.lastScannedBlock,
+                isPartialUpdate: data.isPartialUpdate || false
+            }
         };
 
         // Ensure the static directory exists

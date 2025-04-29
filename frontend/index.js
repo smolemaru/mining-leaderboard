@@ -47,13 +47,29 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!totalHashrate || totalHashrate === '0') return '0%';
     
     try {
-      const minerHashrate = BigInt(hashrate);
-      const networkHashrate = BigInt(totalHashrate);
+      // Convert to numbers and handle string inputs
+      const minerHashrate = Number(hashrate);
+      const networkHashrate = Number(totalHashrate);
       
-      if (networkHashrate === 0n) return '0%';
+      if (networkHashrate === 0) return '0%';
       
-      const percentage = Number(minerHashrate * 100n / networkHashrate);
-      return percentage.toFixed(2) + '%';
+      // Calculate percentage with 6 decimal places precision
+      const percentage = (minerHashrate / networkHashrate) * 100;
+      
+      // Format based on size
+      if (percentage < 0.000001) {
+        return '< 0.000001%';
+      } else if (percentage < 0.0001) {
+        return percentage.toFixed(6) + '%';
+      } else if (percentage < 0.01) {
+        return percentage.toFixed(5) + '%';
+      } else if (percentage < 0.1) {
+        return percentage.toFixed(4) + '%';
+      } else if (percentage < 1) {
+        return percentage.toFixed(3) + '%';
+      } else {
+        return percentage.toFixed(2) + '%';
+      }
     } catch (e) {
       console.error('Error calculating percentage:', e);
       return '0%';
@@ -196,8 +212,11 @@ document.addEventListener('DOMContentLoaded', function() {
       // Store miners with network total hashrate
       allMiners = data.miners.map(miner => ({
         ...miner,
-        networkTotalHashrate: data.totalHashrate
+        networkTotalHashrate: data.totalHashrate || "0"
       }));
+      
+      // Sort miners by hashrate in descending order
+      allMiners.sort((a, b) => Number(b.hashrate) - Number(a.hashrate));
       
       // Initialize filtered miners
       filteredMiners = [...allMiners];

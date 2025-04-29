@@ -46,10 +46,15 @@ const LEADERBOARD_CACHE_PATH = path.join(CACHE_DIR, 'leaderboard-cache.json');
 // Add update state tracking
 let isUpdating = false;
 let lastFullUpdate = 0;
+let updateStartTime = 0;
+const MAX_UPDATE_DURATION = 30 * 60 * 1000; // 30 minutes max for update
 
 // Add genesis block tracking
 const GENESIS_BLOCK = 5606285;
 let lastScannedBlock = GENESIS_BLOCK;
+
+// Add a flag to track initialization
+let isInitialized = false;
 
 // Ensure cache directory exists
 try {
@@ -461,313 +466,369 @@ function checkMemoryUsage() {
   return 0;
 }
 
-// Modified updateLeaderboard function to handle background updates properly
+// Function to check if update is stuck
+function isUpdateStuck() {
+  if (!isUpdating) return false;
+  return Date.now() - updateStartTime > MAX_UPDATE_DURATION;
+}
+
+// Initialize on module load
+console.log('Blockchain service initializing...');
+
+async function initialize() {
+    if (isInitialized) {
+        console.log('Blockchain service already initialized');
+        return;
+    }
+
+    const connectedProvider = await initBlockchainConnection();
+    if (connectedProvider) {
+        console.log('Blockchain connection established');
+        // First try to load cached data
+        const cachedData = loadLeaderboardFromCache();
+        if (cachedData) {
+            console.log('Loaded initial data from cache');
+            leaderboardData = cachedData;
+        }
+    } else {
+        console.error('Failed to establish blockchain connection during initialization');
+    }
+    
+    isInitialized = true;
+}
+
+// Modified updateLeaderboard function
 async function updateLeaderboard(forceUpdate = false) {
-  if (!isConnectedToBlockchain) {
-    console.log('Cannot update leaderboard: Not connected to blockchain');
-    return { success: false, error: 'Not connected to blockchain' };
-  }
-
-  const now = Date.now();
-  const timeSinceLastAttempt = now - lastUpdateAttemptTime;
-
-  // Check if we're trying to update too frequently
-  if (!forceUpdate && timeSinceLastAttempt < MIN_UPDATE_ATTEMPT_INTERVAL) {
-    console.log(`Update attempted too soon. Next update available in ${Math.floor((MIN_UPDATE_ATTEMPT_INTERVAL - timeSinceLastAttempt) / 1000)} seconds`);
-    return { success: true, data: leaderboardData };
-  }
-
-  // First phase: Always try to load cached data first
-  const cachedData = loadLeaderboardFromCache();
-  if (cachedData) {
-    console.log('Loading cached leaderboard data');
-    leaderboardData = cachedData;
-    
-    // If we're already updating or updated recently, just return cached data
-    if (isUpdating) {
-      console.log('Update already in progress, using cached data');
-      return { success: true, data: leaderboardData };
-    }
-    
-    // Check if we need to start a background update
-    const timeSinceLastUpdate = now - lastFullUpdate;
-    if (!forceUpdate && timeSinceLastUpdate < UPDATE_INTERVAL_MS) {
-      console.log(`Using cached data, next update in ${Math.floor((UPDATE_INTERVAL_MS - timeSinceLastUpdate) / 1000)} seconds`);
-      return { success: true, data: leaderboardData };
-    }
-  }
-
-  // Update lastUpdateAttemptTime before starting the update
-  lastUpdateAttemptTime = now;
-
-  // Don't start another update if one is in progress
-  if (isUpdating) {
-    console.log('Update already in progress');
-    return { success: true, data: leaderboardData };
-  }
-
-  // Start background update
-  isUpdating = true;
-  console.log('Starting background leaderboard update...');
-
-  try {
-    if (!provider) {
-      throw new Error('No blockchain provider available');
+    // Ensure initialization
+    if (!isInitialized) {
+        await initialize();
     }
 
-    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
-
-    // Test connection
-    await safeContractCall(
-      async () => await provider.getBlockNumber(),
-      null,
-      'Connection check failed'
-    );
-
-    // Get network total hashrate
-    const networkTotalHashrate = await safeContractCall(
-      async () => await contract.totalHashrate(),
-      null,
-      'Error fetching total network hashrate'
-    );
-
-    if (!networkTotalHashrate) {
-      throw new Error('Failed to get network total hashrate');
+    if (!isConnectedToBlockchain) {
+        console.log('Cannot update leaderboard: Not connected to blockchain');
+        return { success: false, error: 'Not connected to blockchain' };
     }
 
-    // Update miners list from events
-    const minerAddresses = await updateMinersFromEvents(contract, provider);
-    
-    // Get all miners from the contract
-    console.log('Retrieving miners from blockchain events...');
-    
-    // Convert Set to Array for processing
-    const minerArray = Array.from(minerAddresses);
-    
-    // Process all miners
-    const MAX_MINERS_TO_PROCESS = minerArray.length;
-    
-    // Log the total count for verification
-    console.log(`Processing all ${MAX_MINERS_TO_PROCESS} miners`);
+    const now = Date.now();
 
-    // Reset miner data
-    minerData = {};
-
-    // Optimize batch size for large datasets
-    if (MAX_MINERS_TO_PROCESS > 1000) {
-      const oldBatchSize = BATCH_SIZE;
-      BATCH_SIZE = Math.min(MAX_BATCH_SIZE, Math.max(BATCH_SIZE, Math.floor(MAX_MINERS_TO_PROCESS / 1000)));
-      console.log(`Optimizing for large dataset: Increasing batch size from ${oldBatchSize} to ${BATCH_SIZE}`);
+    // Check if previous update is stuck
+    if (isUpdateStuck()) {
+        console.log('Detected stuck update, resetting state...');
+        isUpdating = false;
+        updateStartTime = 0;
     }
 
-    // Split miners into batches
-    const batches = [];
-    for (let i = 0; i < MAX_MINERS_TO_PROCESS; i += BATCH_SIZE) {
-      batches.push(minerArray.slice(i, i + BATCH_SIZE));
+    // If force update, reset the update state
+    if (forceUpdate) {
+        console.log('Force update requested, resetting update state');
+        isUpdating = false;
+        updateStartTime = 0;
+        lastUpdateAttemptTime = 0;
     }
-    
-    console.log(`Processing miners in ${batches.length} batches of up to ${BATCH_SIZE} miners each`);
 
-    // Performance tracking
-    let totalRequests = 0;
-    let successfulRequests = 0;
-    let totalResponseTime = 0;
-    let consecutiveErrors = 0;
-    const MAX_CONSECUTIVE_ERRORS = 3;
-    const UPDATE_PROGRESS_INTERVAL = 10;
-    
-    let totalHashrate = BigInt(0);
-    
-    const startTime = Date.now();
-    let lastProgressTime = startTime;
-    let lastMemoryCheck = startTime;
-    
-    // Process batches
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      // Check memory usage every 1 minute
-      const now = Date.now();
-      if (now - lastMemoryCheck > 60000) {
-        checkMemoryUsage();
-        lastMemoryCheck = now;
-      }
-      
-      // Log progress periodically for large datasets
-      if (batchIndex % UPDATE_PROGRESS_INTERVAL === 0 || batchIndex === batches.length - 1) {
-        const currentTime = Date.now();
-        const elapsedSecs = (currentTime - startTime) / 1000;
-        const progress = ((batchIndex + 1) / batches.length * 100).toFixed(1);
-        const minersDone = (batchIndex + 1) * BATCH_SIZE;
-        const estimatedTotalTime = elapsedSecs / (batchIndex + 1) * batches.length;
-        const remainingTime = Math.max(0, estimatedTotalTime - elapsedSecs);
+    // Rest of the existing updateLeaderboard function...
+
+    const timeSinceLastAttempt = now - lastUpdateAttemptTime;
+
+    // Check if we're trying to update too frequently
+    if (!forceUpdate && timeSinceLastAttempt < MIN_UPDATE_ATTEMPT_INTERVAL) {
+        console.log(`Update attempted too soon. Next update available in ${Math.floor((MIN_UPDATE_ATTEMPT_INTERVAL - timeSinceLastAttempt) / 1000)} seconds`);
+        return { success: true, data: leaderboardData };
+    }
+
+    // First phase: Always try to load cached data first
+    const cachedData = loadLeaderboardFromCache();
+    if (cachedData) {
+        console.log('Loading cached leaderboard data');
+        leaderboardData = cachedData;
         
-        console.log(`Progress: ${progress}% (${minersDone}/${MAX_MINERS_TO_PROCESS} miners) | ` + 
-                    `Elapsed: ${elapsedSecs.toFixed(1)}s | Est. remaining: ${remainingTime.toFixed(1)}s`);
+        // If we're already updating and it's not stuck, just return cached data
+        if (isUpdating && !isUpdateStuck()) {
+            console.log('Update already in progress, using cached data');
+            return { success: true, data: leaderboardData };
+        }
         
-        // Save progress to leaderboard data periodically in case of interruption
-        if (currentTime - lastProgressTime > 30000 && Object.keys(minerData).length > 0) {
-          // Create a temporary leaderboard with current progress
-          const tempMinerEntries = Object.entries(minerData);
-          const tempMiners = tempMinerEntries.map(([address, data]) => ({
+        // Check if we need to start a background update
+        const timeSinceLastUpdate = now - lastFullUpdate;
+        if (!forceUpdate && timeSinceLastUpdate < UPDATE_INTERVAL_MS) {
+            console.log(`Using cached data, next update in ${Math.floor((UPDATE_INTERVAL_MS - timeSinceLastUpdate) / 1000)} seconds`);
+            return { success: true, data: leaderboardData };
+        }
+    }
+
+    // Update lastUpdateAttemptTime before starting the update
+    lastUpdateAttemptTime = now;
+
+    // Don't start another update if one is in progress and not stuck
+    if (isUpdating && !isUpdateStuck()) {
+        console.log('Update already in progress');
+        return { success: true, data: leaderboardData };
+    }
+
+    // Start background update
+    isUpdating = true;
+    updateStartTime = now;
+    console.log('Starting background leaderboard update...');
+
+    try {
+        if (!provider) {
+            throw new Error('No blockchain provider available');
+        }
+
+        const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+
+        // Test connection
+        await safeContractCall(
+            async () => await provider.getBlockNumber(),
+            null,
+            'Connection check failed'
+        );
+
+        // Get network total hashrate
+        const networkTotalHashrate = await safeContractCall(
+            async () => await contract.totalHashrate(),
+            null,
+            'Error fetching total network hashrate'
+        );
+
+        if (!networkTotalHashrate) {
+            throw new Error('Failed to get network total hashrate');
+        }
+
+        // Update miners list from events
+        const minerAddresses = await updateMinersFromEvents(contract, provider);
+        
+        // Get all miners from the contract
+        console.log('Retrieving miners from blockchain events...');
+        
+        // Convert Set to Array for processing
+        const minerArray = Array.from(minerAddresses);
+        
+        // Process all miners
+        const MAX_MINERS_TO_PROCESS = minerArray.length;
+        
+        // Log the total count for verification
+        console.log(`Processing all ${MAX_MINERS_TO_PROCESS} miners`);
+
+        // Reset miner data
+        minerData = {};
+
+        // Optimize batch size for large datasets
+        if (MAX_MINERS_TO_PROCESS > 1000) {
+            const oldBatchSize = BATCH_SIZE;
+            BATCH_SIZE = Math.min(MAX_BATCH_SIZE, Math.max(BATCH_SIZE, Math.floor(MAX_MINERS_TO_PROCESS / 1000)));
+            console.log(`Optimizing for large dataset: Increasing batch size from ${oldBatchSize} to ${BATCH_SIZE}`);
+        }
+
+        // Split miners into batches
+        const batches = [];
+        for (let i = 0; i < MAX_MINERS_TO_PROCESS; i += BATCH_SIZE) {
+            batches.push(minerArray.slice(i, i + BATCH_SIZE));
+        }
+        
+        console.log(`Processing miners in ${batches.length} batches of up to ${BATCH_SIZE} miners each`);
+
+        // Performance tracking
+        let totalRequests = 0;
+        let successfulRequests = 0;
+        let totalResponseTime = 0;
+        let consecutiveErrors = 0;
+        const MAX_CONSECUTIVE_ERRORS = 3;
+        const UPDATE_PROGRESS_INTERVAL = 10;
+        
+        let totalHashrate = BigInt(0);
+        
+        const startTime = Date.now();
+        let lastProgressTime = startTime;
+        let lastMemoryCheck = startTime;
+        
+        // Process batches
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            // Check memory usage every 1 minute
+            const now = Date.now();
+            if (now - lastMemoryCheck > 60000) {
+                checkMemoryUsage();
+                lastMemoryCheck = now;
+            }
+            
+            // Log progress periodically for large datasets
+            if (batchIndex % UPDATE_PROGRESS_INTERVAL === 0 || batchIndex === batches.length - 1) {
+                const currentTime = Date.now();
+                const elapsedSecs = (currentTime - startTime) / 1000;
+                const progress = ((batchIndex + 1) / batches.length * 100).toFixed(1);
+                const minersDone = (batchIndex + 1) * BATCH_SIZE;
+                const estimatedTotalTime = elapsedSecs / (batchIndex + 1) * batches.length;
+                const remainingTime = Math.max(0, estimatedTotalTime - elapsedSecs);
+                
+                console.log(`Progress: ${progress}% (${minersDone}/${MAX_MINERS_TO_PROCESS} miners) | ` + 
+                            `Elapsed: ${elapsedSecs.toFixed(1)}s | Est. remaining: ${remainingTime.toFixed(1)}s`);
+                
+                // Save progress to leaderboard data periodically in case of interruption
+                if (currentTime - lastProgressTime > 30000 && Object.keys(minerData).length > 0) {
+                    // Create a temporary leaderboard with current progress
+                    const tempMinerEntries = Object.entries(minerData);
+                    const tempMiners = tempMinerEntries.map(([address, data]) => ({
+                        address,
+                        hashrate: data.hashrate.toString(),
+                        totalHashrate: data.hashrate.toString()
+                    }));
+                    
+                    // Sort and update leaderboard data
+                    const tempSortedMiners = tempMiners.sort((a, b) => {
+                        const hashrateA = BigInt(a.hashrate || "0");
+                        const hashrateB = BigInt(b.hashrate || "0");
+                        return hashrateB > hashrateA ? 1 : hashrateB < hashrateA ? -1 : 0;
+                    });
+                    
+                    // Calculate current total hashrate
+                    const tempTotalHashrate = totalHashrate.toString();
+                    
+                    // Update leaderboard data with progress
+                    leaderboardData = {
+                        miners: tempSortedMiners,
+                        networkHashrate: tempTotalHashrate,
+                        totalHashrate: tempTotalHashrate,
+                        totalMiners: tempMiners.length,
+                        lastUpdated: new Date().toISOString(),
+                        isPartialUpdate: true // Flag to indicate this is a partial update
+                    };
+                    
+                    // Save progress to cache
+                    saveLeaderboardToCache(leaderboardData);
+                    
+                    lastUpdateTime = Date.now();
+                    lastProgressTime = currentTime;
+                    console.log(`Saved progress with ${tempSortedMiners.length} miners processed so far`);
+                }
+            }
+            
+            // Check if we lost connection during processing
+            if (!isConnectedToBlockchain) {
+                console.log('Connection lost during batch processing, aborting leaderboard update');
+                throw new Error('Connection lost during batch processing');
+            }
+            
+            const batch = batches[batchIndex];
+            console.log(`Processing batch ${batchIndex + 1}/${batches.length} with ${batch.length} miners`);
+            
+            const batchPromises = [];
+            const batchStartTime = Date.now();
+            
+            for (const address of batch) {
+                totalRequests++;
+                batchPromises.push(
+                    fetchHashrateWithRetries(contract, address).then(hashrate => {
+                        // Record successful request
+                        successfulRequests++;
+                        consecutiveErrors = 0;
+                        
+                        // Store hashrate in minerData
+                        if (!minerData[address]) {
+                            minerData[address] = { hashrate: BigInt(hashrate) };
+                        } else {
+                            minerData[address].hashrate = BigInt(hashrate);
+                        }
+                        
+                        // Add to total hashrate
+                        totalHashrate += BigInt(hashrate);
+                    }).catch(error => {
+                        console.error(`Error processing miner ${address}:`, error.message);
+                        consecutiveErrors++;
+                        
+                        // If too many errors in a row, connection might be unstable
+                        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                            console.error(`${MAX_CONSECUTIVE_ERRORS} consecutive errors detected, connection may be unstable`);
+                            // Force a connection health check
+                            connectionHealthCounter = Math.max(connectionHealthCounter - 2, 0);
+                            
+                            // Reset consecutive errors counter
+                            consecutiveErrors = 0;
+                        }
+                    })
+                );
+            }
+            
+            // Wait for all promises in this batch to resolve
+            await Promise.all(batchPromises);
+            
+            // If connection health is too low, stop processing
+            if (connectionHealthCounter < CONNECTION_HEALTH_THRESHOLD) {
+                console.log('Connection health too low, aborting leaderboard update');
+                throw new Error('Connection health degraded during batch processing');
+            }
+            
+            // Calculate batch response time
+            const batchResponseTime = Date.now() - batchStartTime;
+            totalResponseTime += batchResponseTime;
+            console.log(`Batch ${batchIndex + 1} completed in ${batchResponseTime}ms`);
+            
+            // Add delay before next batch (except for the last batch)
+            if (batchIndex < batches.length - 1) {
+                console.log(`Waiting ${BATCH_DELAY_MS}ms before processing next batch`);
+                await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+            }
+        }
+        
+        // Calculate performance metrics
+        const successRate = totalRequests > 0 ? successfulRequests / totalRequests : 0;
+        const avgResponseTime = batches.length > 0 ? totalResponseTime / batches.length : 0;
+        
+        // Only adjust parameters if we had good success (otherwise might be connection issues)
+        if (successRate > 0.5) {
+            // Adjust batch parameters based on performance
+            adjustBatchParameters(successRate, avgResponseTime);
+        } else {
+            console.log(`Success rate too low (${successRate * 100}%), not adjusting batch parameters`);
+        }
+
+        // Convert miner data to leaderboard format
+        const minerEntries = Object.entries(minerData);
+        console.log(`Processing ${minerEntries.length} miner entries`);
+        
+        if (minerEntries.length === 0) {
+            throw new Error('No miner data retrieved, possible blockchain connection issue');
+        }
+        
+        // Convert entries to array format and sort
+        const miners = minerEntries.map(([address, data]) => ({
             address,
             hashrate: data.hashrate.toString(),
             totalHashrate: data.hashrate.toString()
-          }));
-          
-          // Sort and update leaderboard data
-          const tempSortedMiners = tempMiners.sort((a, b) => {
+        })).sort((a, b) => {
             const hashrateA = BigInt(a.hashrate || "0");
             const hashrateB = BigInt(b.hashrate || "0");
             return hashrateB > hashrateA ? 1 : hashrateB < hashrateA ? -1 : 0;
-          });
-          
-          // Calculate current total hashrate
-          const tempTotalHashrate = totalHashrate.toString();
-          
-          // Update leaderboard data with progress
-          leaderboardData = {
-            miners: tempSortedMiners,
-            networkHashrate: tempTotalHashrate,
-            totalHashrate: tempTotalHashrate,
-            totalMiners: tempMiners.length,
+        });
+
+        // Update leaderboard data
+        leaderboardData = {
+            miners,
+            totalHashrate: networkTotalHashrate ? networkTotalHashrate.toString() : totalHashrate.toString(),
             lastUpdated: new Date().toISOString(),
-            isPartialUpdate: true // Flag to indicate this is a partial update
-          };
-          
-          // Save progress to cache
-          saveLeaderboardToCache(leaderboardData);
-          
-          lastUpdateTime = Date.now();
-          lastProgressTime = currentTime;
-          console.log(`Saved progress with ${tempSortedMiners.length} miners processed so far`);
-        }
-      }
-      
-      // Check if we lost connection during processing
-      if (!isConnectedToBlockchain) {
-        console.log('Connection lost during batch processing, aborting leaderboard update');
-        throw new Error('Connection lost during batch processing');
-      }
-      
-      const batch = batches[batchIndex];
-      console.log(`Processing batch ${batchIndex + 1}/${batches.length} with ${batch.length} miners`);
-      
-      const batchPromises = [];
-      const batchStartTime = Date.now();
-      
-      for (const address of batch) {
-        totalRequests++;
-        batchPromises.push(
-          fetchHashrateWithRetries(contract, address).then(hashrate => {
-            // Record successful request
-            successfulRequests++;
-            consecutiveErrors = 0;
-            
-            // Store hashrate in minerData
-            if (!minerData[address]) {
-              minerData[address] = { hashrate: BigInt(hashrate) };
-            } else {
-              minerData[address].hashrate = BigInt(hashrate);
+            status: {
+                blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
+                lastUpdate: new Date().toISOString()
             }
-            
-            // Add to total hashrate
-            totalHashrate += BigInt(hashrate);
-          }).catch(error => {
-            console.error(`Error processing miner ${address}:`, error.message);
-            consecutiveErrors++;
-            
-            // If too many errors in a row, connection might be unstable
-            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-              console.error(`${MAX_CONSECUTIVE_ERRORS} consecutive errors detected, connection may be unstable`);
-              // Force a connection health check
-              connectionHealthCounter = Math.max(connectionHealthCounter - 2, 0);
-              
-              // Reset consecutive errors counter
-              consecutiveErrors = 0;
-            }
-          })
-        );
-      }
-      
-      // Wait for all promises in this batch to resolve
-      await Promise.all(batchPromises);
-      
-      // If connection health is too low, stop processing
-      if (connectionHealthCounter < CONNECTION_HEALTH_THRESHOLD) {
-        console.log('Connection health too low, aborting leaderboard update');
-        throw new Error('Connection health degraded during batch processing');
-      }
-      
-      // Calculate batch response time
-      const batchResponseTime = Date.now() - batchStartTime;
-      totalResponseTime += batchResponseTime;
-      console.log(`Batch ${batchIndex + 1} completed in ${batchResponseTime}ms`);
-      
-      // Add delay before next batch (except for the last batch)
-      if (batchIndex < batches.length - 1) {
-        console.log(`Waiting ${BATCH_DELAY_MS}ms before processing next batch`);
-        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
-      }
-    }
-    
-    // Calculate performance metrics
-    const successRate = totalRequests > 0 ? successfulRequests / totalRequests : 0;
-    const avgResponseTime = batches.length > 0 ? totalResponseTime / batches.length : 0;
-    
-    // Only adjust parameters if we had good success (otherwise might be connection issues)
-    if (successRate > 0.5) {
-      // Adjust batch parameters based on performance
-      adjustBatchParameters(successRate, avgResponseTime);
-    } else {
-      console.log(`Success rate too low (${successRate * 100}%), not adjusting batch parameters`);
-    }
+        };
+        
+        // Update timestamp
+        lastUpdateTime = Date.now();
+        
+        console.log(`Leaderboard updated successfully with ${miners.length} miners`);
 
-    // Convert miner data to leaderboard format
-    const minerEntries = Object.entries(minerData);
-    console.log(`Processing ${minerEntries.length} miner entries`);
-    
-    if (minerEntries.length === 0) {
-      throw new Error('No miner data retrieved, possible blockchain connection issue');
+        // After successful update, save to cache and update timestamps
+        saveLeaderboardToCache(leaderboardData);
+        lastFullUpdate = Date.now();
+        console.log('Background update completed successfully');
+        
+        return { success: true, data: leaderboardData };
+    } catch (error) {
+        console.error('Error in background update:', error.message);
+        return { success: false, error: error.message, data: leaderboardData };
+    } finally {
+        isUpdating = false;
+        updateStartTime = 0;
     }
-    
-    // Convert entries to array format and sort
-    const miners = minerEntries.map(([address, data]) => ({
-      address,
-      hashrate: data.hashrate.toString(),
-      totalHashrate: data.hashrate.toString()
-    })).sort((a, b) => {
-      const hashrateA = BigInt(a.hashrate || "0");
-      const hashrateB = BigInt(b.hashrate || "0");
-      return hashrateB > hashrateA ? 1 : hashrateB < hashrateA ? -1 : 0;
-    });
-
-    // Update leaderboard data
-    leaderboardData = {
-      miners,
-      totalHashrate: networkTotalHashrate ? networkTotalHashrate.toString() : totalHashrate.toString(),
-      lastUpdated: new Date().toISOString(),
-      status: {
-        blockchain: isConnectedToBlockchain ? 'connected' : 'disconnected',
-        lastUpdate: new Date().toISOString()
-      }
-    };
-    
-    // Update timestamp
-    lastUpdateTime = Date.now();
-    
-    console.log(`Leaderboard updated successfully with ${miners.length} miners`);
-
-    // After successful update, save to cache and update timestamps
-    saveLeaderboardToCache(leaderboardData);
-    lastFullUpdate = Date.now();
-    console.log('Background update completed successfully');
-    
-    return { success: true, data: leaderboardData };
-  } catch (error) {
-    console.error('Error in background update:', error.message);
-    return { success: false, error: error.message, data: leaderboardData };
-  } finally {
-    isUpdating = false;
-  }
 }
 
 // Get mock data for testing and fallback
@@ -789,26 +850,6 @@ function getMockData() {
     }
   };
 }
-
-// Initialize on module load
-console.log('Blockchain service initializing...');
-initBlockchainConnection().then(connectedProvider => {
-  if (connectedProvider) {
-    console.log('Blockchain connection established');
-    // First try to load cached data
-    const cachedData = loadLeaderboardFromCache();
-    if (cachedData) {
-      console.log('Loaded initial data from cache');
-      leaderboardData = cachedData;
-    }
-    // Start background update
-    updateLeaderboard().catch(error => {
-      console.error('Initial background update failed:', error.message);
-    });
-  } else {
-    console.error('Failed to establish blockchain connection during initialization');
-  }
-});
 
 // Dynamic batch adjustment based on performance
 function adjustBatchParameters(successRate, responseTime) {
@@ -950,6 +991,7 @@ module.exports = {
     return leaderboardData; 
   },
   get lastUpdateTime() { return lastUpdateTime; },
+  initialize,
   updateLeaderboard,
   initBlockchainConnection,
   setBlockchainConnected,
