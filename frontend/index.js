@@ -35,14 +35,10 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Generate links for AbScan, Game Room, and Abstract Profile
   function generateLinks(address) {
-    const abscanLink = `https://abscan.org/address/${address}`;
-    const gameRoomLink = `https://www.bigcoin.tech/room/${address}`;
-    const abstractProfileLink = `https://portal.abs.xyz/profile/${address}`;
-    
     return {
-      abscanLink,
-      gameRoomLink,
-      abstractProfileLink
+      abscanLink: `https://abscan.org/address/${address}`,
+      gameRoomLink: `https://www.bigcoin.tech/room/${address}`,
+      abstractProfileLink: `https://portal.abs.xyz/profile/${address}`
     };
   }
   
@@ -56,21 +52,8 @@ document.addEventListener('DOMContentLoaded', function() {
       
       if (networkHashrate === 0n) return '0%';
       
-      const percentage = Number(minerHashrate * BigInt(100000000) / networkHashrate) / 1000000;
-      
-      if (percentage < 0.000001) {
-        return '< 0.000001%';
-      } else if (percentage < 0.0001) {
-        return percentage.toFixed(6) + '%';
-      } else if (percentage < 0.01) {
-        return percentage.toFixed(5) + '%';
-      } else if (percentage < 0.1) {
-        return percentage.toFixed(4) + '%';
-      } else if (percentage < 1) {
-        return percentage.toFixed(3) + '%';
-      } else {
-        return percentage.toFixed(2) + '%';
-      }
+      const percentage = Number(minerHashrate * 100n / networkHashrate);
+      return percentage.toFixed(2) + '%';
     } catch (e) {
       console.error('Error calculating percentage:', e);
       return '0%';
@@ -116,8 +99,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     // Update displayed count
-    displayedMinersCount.textContent = filteredMiners.length;
-    totalMinersCount.textContent = allMiners.length;
+    if (displayedMinersCount) displayedMinersCount.textContent = filteredMiners.length;
+    if (totalMinersCount) totalMinersCount.textContent = allMiners.length;
     
     // Reset to first page when filtering
     currentPage = 1;
@@ -128,17 +111,21 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Function to render the current page of miners
   function renderMiners() {
+    if (!minerTableBody) return;
+    
     // Calculate pagination
     const startIndex = (currentPage - 1) * minersPerPage;
     const endIndex = Math.min(startIndex + minersPerPage, filteredMiners.length);
     const currentMiners = filteredMiners.slice(startIndex, endIndex);
     
     // Update pagination info
-    paginationInfo.textContent = `Page ${currentPage} of ${Math.ceil(filteredMiners.length / minersPerPage)}`;
+    if (paginationInfo) {
+      paginationInfo.textContent = `Page ${currentPage} of ${Math.ceil(filteredMiners.length / minersPerPage)}`;
+    }
     
     // Enable/disable pagination buttons
-    prevPageBtn.disabled = currentPage === 1;
-    nextPageBtn.disabled = endIndex >= filteredMiners.length;
+    if (prevPageBtn) prevPageBtn.disabled = currentPage === 1;
+    if (nextPageBtn) nextPageBtn.disabled = endIndex >= filteredMiners.length;
     
     // Clear the table
     minerTableBody.innerHTML = '';
@@ -152,32 +139,14 @@ document.addEventListener('DOMContentLoaded', function() {
       return;
     }
     
-    // Get the real total network hashrate
-    const networkTotalHashrate = allMiners[0].networkTotalHashrate || "0";
-    
     // Add miners to the table
     currentMiners.forEach((miner, index) => {
       const row = document.createElement('tr');
-      
-      // Global rank (position in the allMiners array)
-      const globalRank = allMiners.findIndex(m => m.address === miner.address) + 1;
-      
-      // Determine badge color based on global rank
-      let badgeColor = 'bg-secondary';
-      if (globalRank === 1) badgeColor = 'bg-warning text-dark'; // Gold
-      else if (globalRank === 2) badgeColor = 'bg-light text-dark'; // Silver
-      else if (globalRank === 3) badgeColor = 'bg-danger'; // Bronze
-      
-      // Generate links for this miner
+      const globalRank = startIndex + index + 1;
       const links = generateLinks(miner.address);
       
-      // Ensure we have a valid hashrate value for display
-      const minerHashrate = miner.totalHashrate || miner.hashrate || "0";
-      
       row.innerHTML = `
-        <td>
-          <span class="rank-badge ${badgeColor}">${globalRank}</span>
-        </td>
+        <td>${globalRank}</td>
         <td class="miner-address-cell">
           <div class="d-flex align-items-center">
             <a href="${links.abscanLink}" target="_blank" class="text-decoration-none text-info me-2">${shortenAddress(miner.address)}</a>
@@ -190,8 +159,8 @@ document.addEventListener('DOMContentLoaded', function() {
             </div>
           </div>
         </td>
-        <td>${formatHashrate(minerHashrate)}</td>
-        <td>${calculatePercentage(minerHashrate, networkTotalHashrate)}</td>
+        <td>${formatHashrate(miner.hashrate)}</td>
+        <td>${calculatePercentage(miner.hashrate, miner.networkTotalHashrate)}</td>
       `;
       
       minerTableBody.appendChild(row);
@@ -205,120 +174,110 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
   
-  // Function to update network stats
-  function updateNetworkStats(totalHashrate, minerCount) {
-    totalNetworkHashrate.textContent = formatHashrate(totalHashrate);
-    totalMinersCount.textContent = minerCount.toLocaleString();
+  async function fetchLeaderboardData() {
+    try {
+      showLoading(true);
+      showError('', false);
+      
+      console.log('Fetching leaderboard data...');
+      const response = await fetch('/static/leaderboard.json');
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('Received leaderboard data:', data);
+      
+      if (!data || !data.miners) {
+        throw new Error('Invalid data format received');
+      }
+      
+      // Store miners with network total hashrate
+      allMiners = data.miners.map(miner => ({
+        ...miner,
+        networkTotalHashrate: data.totalHashrate
+      }));
+      
+      // Initialize filtered miners
+      filteredMiners = [...allMiners];
+      
+      // Update UI elements
+      if (totalNetworkHashrate) totalNetworkHashrate.textContent = formatHashrate(data.totalHashrate);
+      if (totalMinersCount) totalMinersCount.textContent = allMiners.length;
+      if (displayedMinersCount) displayedMinersCount.textContent = allMiners.length;
+      if (lastUpdateEl) lastUpdateEl.textContent = new Date().toLocaleString();
+      
+      // Render miners table
+      renderMiners();
+      
+    } catch (error) {
+      console.error('Error fetching leaderboard data:', error);
+      showError(`Failed to load leaderboard data: ${error.message}`);
+    } finally {
+      showLoading(false);
+    }
   }
   
   // Helper functions for UI state management
   function showLoading(show = true) {
-    document.getElementById('loadingIndicator').style.display = show ? 'flex' : 'none';
+    if (loadingIndicator) {
+      loadingIndicator.style.display = show ? 'flex' : 'none';
+    }
   }
   
   function showError(message = '', show = true) {
-    const errorElement = document.getElementById('errorMessage');
-    errorElement.style.display = show ? 'block' : 'none';
-    if (show) {
-        errorElement.textContent = message;
+    if (errorMessage) {
+      errorMessage.style.display = show ? 'block' : 'none';
+      if (show) {
+        errorMessage.textContent = message;
+      }
     }
-  }
-  
-  async function fetchLeaderboardData() {
-    try {
-        showLoading(true);
-        showError('', false);
-        
-        console.log('Fetching leaderboard data...');
-        const response = await fetch('/static/leaderboard.json');
-        
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        console.log('Received leaderboard data:', data);
-        
-        if (!data || !data.miners) {
-            throw new Error('Invalid data format received');
-        }
-        
-        // Update UI with the received data
-        updateLeaderboardUI(data);
-        
-        // Update timestamp
-        const lastUpdated = new Date(data.timestamp || Date.now());
-        document.getElementById('lastUpdated').textContent = lastUpdated.toLocaleString();
-        
-    } catch (error) {
-        console.error('Error fetching leaderboard data:', error);
-        showError(`Failed to load leaderboard data: ${error.message}`);
-    } finally {
-        showLoading(false);
-    }
-  }
-  
-  function updateLeaderboardUI(data) {
-    // Update total network stats
-    document.getElementById('totalNetworkHashrate').textContent = `${formatHashrate(data.totalHashrate)}`;
-    document.getElementById('totalMinersCount').textContent = data.miners.length;
-    
-    // Clear existing table
-    const tbody = document.querySelector('#leaderboardTable tbody');
-    tbody.innerHTML = '';
-    
-    // Sort miners by hashrate in descending order
-    const sortedMiners = [...data.miners].sort((a, b) => b.hashrate - a.hashrate);
-    
-    // Populate table with miner data
-    sortedMiners.forEach((miner, index) => {
-        const row = document.createElement('tr');
-        row.innerHTML = `
-            <td>${index + 1}</td>
-            <td>${miner.address}</td>
-            <td>${formatHashrate(miner.hashrate)}</td>
-            <td>${miner.shares || 0}</td>
-        `;
-        tbody.appendChild(row);
-    });
   }
   
   // Initialize event listeners
   function initEventListeners() {
-    // Search input
-    minerSearchInput.addEventListener('input', filterMiners);
+    if (minerSearchInput) {
+      minerSearchInput.addEventListener('input', filterMiners);
+    }
     
-    // Clear search button
-    clearSearchButton.addEventListener('click', function() {
-      minerSearchInput.value = '';
-      filterMiners();
-    });
+    if (clearSearchButton) {
+      clearSearchButton.addEventListener('click', function() {
+        if (minerSearchInput) {
+          minerSearchInput.value = '';
+          filterMiners();
+        }
+      });
+    }
     
-    // Pagination
-    prevPageBtn.addEventListener('click', function() {
-      if (currentPage > 1) {
-        currentPage--;
-        renderMiners();
-      }
-    });
+    if (prevPageBtn) {
+      prevPageBtn.addEventListener('click', function() {
+        if (currentPage > 1) {
+          currentPage--;
+          renderMiners();
+        }
+      });
+    }
     
-    nextPageBtn.addEventListener('click', function() {
-      if ((currentPage * minersPerPage) < filteredMiners.length) {
-        currentPage++;
-        renderMiners();
-      }
-    });
+    if (nextPageBtn) {
+      nextPageBtn.addEventListener('click', function() {
+        if ((currentPage * minersPerPage) < filteredMiners.length) {
+          currentPage++;
+          renderMiners();
+        }
+      });
+    }
     
-    // Refresh button
-    refreshButton.addEventListener('click', function() {
-      fetchLeaderboardData();
-    });
+    if (refreshButton) {
+      refreshButton.addEventListener('click', fetchLeaderboardData);
+    }
   }
   
   // Initialize the app
   function init() {
     initEventListeners();
     fetchLeaderboardData();
+    // Refresh every 5 minutes
     setInterval(fetchLeaderboardData, 5 * 60 * 1000);
   }
   
