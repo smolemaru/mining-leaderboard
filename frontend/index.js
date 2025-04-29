@@ -211,42 +211,76 @@ document.addEventListener('DOMContentLoaded', function() {
     totalMinersCount.textContent = minerCount.toLocaleString();
   }
   
-  // Function to fetch leaderboard data from the API
+  // Helper functions for UI state management
+  function showLoading(show = true) {
+    document.getElementById('loadingIndicator').style.display = show ? 'flex' : 'none';
+  }
+  
+  function showError(message = '', show = true) {
+    const errorElement = document.getElementById('errorMessage');
+    errorElement.style.display = show ? 'block' : 'none';
+    if (show) {
+        errorElement.textContent = message;
+    }
+  }
+  
   async function fetchLeaderboardData() {
-    showLoading(true);
     try {
+        showLoading(true);
+        showError('', false);
+        
+        console.log('Fetching leaderboard data...');
         const response = await fetch('/static/leaderboard.json');
+        
         if (!response.ok) {
-            throw new Error('Failed to fetch leaderboard data');
+            throw new Error(`HTTP error! status: ${response.status}`);
         }
         
         const data = await response.json();
+        console.log('Received leaderboard data:', data);
         
-        // Check if data is stale (past nextUpdateAfter)
-        const nextUpdate = new Date(data.nextUpdateAfter);
-        const now = new Date();
-        if (now > nextUpdate) {
-            console.log('Data is stale, waiting for next update');
-            document.getElementById('lastUpdate').innerHTML = 
-                `${formatTimestamp(data.generatedAt)} <span class="text-warning">(Waiting for update)</span>`;
-        } else {
-            document.getElementById('lastUpdate').textContent = formatTimestamp(data.generatedAt);
+        if (!data || !data.miners) {
+            throw new Error('Invalid data format received');
         }
         
-        return data;
+        // Update UI with the received data
+        updateLeaderboardUI(data);
+        
+        // Update timestamp
+        const lastUpdated = new Date(data.timestamp || Date.now());
+        document.getElementById('lastUpdated').textContent = lastUpdated.toLocaleString();
+        
     } catch (error) {
-        console.error('Error fetching leaderboard:', error);
-        showError(true);
-        return null;
+        console.error('Error fetching leaderboard data:', error);
+        showError(`Failed to load leaderboard data: ${error.message}`);
     } finally {
         showLoading(false);
     }
   }
   
-  // Add this helper function
-  function formatTimestamp(isoString) {
-    const date = new Date(isoString);
-    return date.toLocaleString();
+  function updateLeaderboardUI(data) {
+    // Update total network stats
+    document.getElementById('totalNetworkHashrate').textContent = `${formatHashrate(data.totalHashrate)}`;
+    document.getElementById('totalMinersCount').textContent = data.miners.length;
+    
+    // Clear existing table
+    const tbody = document.querySelector('#leaderboardTable tbody');
+    tbody.innerHTML = '';
+    
+    // Sort miners by hashrate in descending order
+    const sortedMiners = [...data.miners].sort((a, b) => b.hashrate - a.hashrate);
+    
+    // Populate table with miner data
+    sortedMiners.forEach((miner, index) => {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${index + 1}</td>
+            <td>${miner.address}</td>
+            <td>${formatHashrate(miner.hashrate)}</td>
+            <td>${miner.shares || 0}</td>
+        `;
+        tbody.appendChild(row);
+    });
   }
   
   // Initialize event listeners
@@ -285,7 +319,7 @@ document.addEventListener('DOMContentLoaded', function() {
   function init() {
     initEventListeners();
     fetchLeaderboardData();
-    setInterval(fetchLeaderboardData, 60000);
+    setInterval(fetchLeaderboardData, 5 * 60 * 1000);
   }
   
   init();
