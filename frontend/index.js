@@ -213,80 +213,40 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // Function to fetch leaderboard data from the API
   async function fetchLeaderboardData() {
-    loadingIndicator.style.display = 'flex';
-    errorMessage.style.display = 'none';
-    
+    showLoading(true);
     try {
-      const response = await fetch('/api/leaderboard');
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! Status: ${response.status}`);
-      }
-      
-      const rawData = await response.json();
-      console.log('Received raw data from API:', rawData); // Debug log
-      
-      // Handle nested data structure
-      const data = rawData.data || rawData;
-      console.log('Processed data:', data); // Debug log
-      
-      loadingIndicator.style.display = 'none';
-      
-      // Validate and extract miners data
-      let miners = [];
-      if (data.miners) {
-        if (Array.isArray(data.miners)) {
-          miners = data.miners;
-        } else {
-          console.warn('Miners property is not an array:', data.miners);
+        const response = await fetch('/static/leaderboard.json');
+        if (!response.ok) {
+            throw new Error('Failed to fetch leaderboard data');
         }
-      } else if (Array.isArray(data)) {
-        // Handle case where the response might be just the miners array
-        miners = data;
-      }
-      
-      console.log('Extracted miners data:', {
-        minersFound: miners.length > 0,
-        minersCount: miners.length,
-        firstMiner: miners[0]
-      });
-      
-      // Validate totalHashrate
-      const totalHashrate = data.totalHashrate || data.networkHashrate || '0';
-      
-      // If we have no miners data at all, throw error
-      if (miners.length === 0) {
-        throw new Error('No miners data available');
-      }
-      
-      // Store miners data with network hashrate
-      allMiners = miners.map(miner => ({
-        ...miner,
-        networkTotalHashrate: totalHashrate
-      }));
-      
-      // Update network stats
-      updateNetworkStats(totalHashrate, miners.length);
-      
-      // Update timestamp - check all possible timestamp locations
-      const timestamp = rawData.status?.lastUpdate || data.lastUpdated || rawData.status?.timestamp || new Date().toISOString();
-      if (timestamp) {
-        lastUpdateEl.textContent = new Date(timestamp).toLocaleString();
-      }
-      
-      // Initial filter/render
-      filterMiners();
+        
+        const data = await response.json();
+        
+        // Check if data is stale (past nextUpdateAfter)
+        const nextUpdate = new Date(data.nextUpdateAfter);
+        const now = new Date();
+        if (now > nextUpdate) {
+            console.log('Data is stale, waiting for next update');
+            document.getElementById('lastUpdate').innerHTML = 
+                `${formatTimestamp(data.generatedAt)} <span class="text-warning">(Waiting for update)</span>`;
+        } else {
+            document.getElementById('lastUpdate').textContent = formatTimestamp(data.generatedAt);
+        }
+        
+        return data;
     } catch (error) {
-      console.error('Error fetching leaderboard data:', error);
-      console.error('Full error details:', {
-        message: error.message,
-        stack: error.stack,
-        cause: error.cause
-      });
-      loadingIndicator.style.display = 'none';
-      errorMessage.style.display = 'block';
-      errorMessage.textContent = 'Failed to load leaderboard data: ' + error.message;
+        console.error('Error fetching leaderboard:', error);
+        showError(true);
+        return null;
+    } finally {
+        showLoading(false);
     }
+  }
+  
+  // Add this helper function
+  function formatTimestamp(isoString) {
+    const date = new Date(isoString);
+    return date.toLocaleString();
   }
   
   // Initialize event listeners

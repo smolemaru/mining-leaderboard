@@ -1,29 +1,9 @@
 {
   "version": 2,
   "builds": [
-    { 
-      "src": "backend/server.js", 
-      "use": "@vercel/node",
-      "config": {
-        "memory": 1024,
-        "maxDuration": 300
-      }
-    },
     { "src": "frontend/**/*", "use": "@vercel/static" }
   ],
   "routes": [
-    { 
-      "src": "/api/(.*)", 
-      "dest": "backend/server.js",
-      "headers": {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
-      }
-    },
     { "src": "/(.*)", "dest": "frontend/$1" }
-  ],
-  "env": {
-    "NODE_ENV": "production"
-  }
+  ]
 } 
