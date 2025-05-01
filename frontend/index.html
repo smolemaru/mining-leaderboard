@@ -13,7 +13,9 @@
       --table-bg: #ffffff;
       --stats-bg: #f8f9fa;
       --border-color: #dee2e6;
-      --stats-label-color: #6c757d;
+      --table-hover: #f8f9fa;
+      --table-header-bg: #f8f9fa;
+      --rank-badge-bg: #e9ecef;
     }
     
     :root[data-theme="dark"] {
@@ -22,7 +24,9 @@
       --table-bg: #2c3034;
       --stats-bg: #2c3034;
       --border-color: #495057;
-      --stats-label-color: #adb5bd;
+      --table-hover: #343a40;
+      --table-header-bg: #343a40;
+      --rank-badge-bg: #495057;
     }
     
     body {
@@ -34,26 +38,150 @@
     .table {
       color: var(--text-color);
       background-color: var(--table-bg);
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+      margin-bottom: 2rem;
+    }
+    
+    .table thead th {
+      background-color: var(--table-header-bg);
+      border-bottom: 2px solid var(--border-color);
+      padding: 1rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.85rem;
+      letter-spacing: 0.5px;
+    }
+    
+    .table tbody td {
+      padding: 1rem;
+      vertical-align: middle;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .table tbody tr:last-child td {
+      border-bottom: none;
+    }
+    
+    .table tbody tr:hover {
+      background-color: var(--table-hover);
+    }
+    
+    .table-responsive {
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    
+    .rank-badge {
+      display: inline-block;
+      padding: 0.4em 0.8em;
+      font-size: 0.85em;
+      font-weight: 600;
+      border-radius: 6px;
+      background-color: var(--rank-badge-bg);
+      color: var(--text-color);
     }
     
     .network-stats {
       background: #f8f9fa;
-      border-radius: 8px;
-      padding: 15px;
-      margin-bottom: 20px;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
       border: 1px solid var(--border-color);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     
     .stats-label {
       color: #6c757d;
       font-size: 0.9em;
-      margin-bottom: 5px;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 500;
     }
     
     .stats-value {
       color: #212529;
-      font-size: 1.2em;
-      font-weight: bold;
+      font-size: 1.4em;
+      font-weight: 700;
+    }
+    
+    .btn {
+      padding: 0.5rem 1rem;
+      font-weight: 500;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+    
+    .btn-outline-primary {
+      border-width: 2px;
+    }
+    
+    .btn-outline-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 4px rgba(13, 110, 253, 0.15);
+    }
+    
+    .copy-btn {
+      background: none;
+      border: none;
+      color: #6c757d;
+      cursor: pointer;
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      transition: all 0.2s;
+    }
+    
+    .copy-btn:hover {
+      color: #0d6efd;
+      background-color: rgba(13, 110, 253, 0.1);
+    }
+    
+    .miner-address-cell {
+      max-width: 400px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 0.9em;
+    }
+    
+    .pagination-container {
+      background: var(--stats-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 1rem;
+    }
+    
+    #paginationInfo {
+      font-weight: 500;
+    }
+    
+    .form-control {
+      border-radius: 8px;
+      padding: 0.6rem 1rem;
+      border: 2px solid var(--border-color);
+      transition: all 0.2s;
+    }
+    
+    .form-control:focus {
+      border-color: #0d6efd;
+      box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.15);
+    }
+    
+    .input-group .btn {
+      border-top-right-radius: 8px !important;
+      border-bottom-right-radius: 8px !important;
+    }
+    
+    .input-group .form-control {
+      border-top-left-radius: 8px !important;
+      border-bottom-left-radius: 8px !important;
+    }
+    
+    h1 {
+      font-weight: 700;
+      margin-bottom: 2rem;
+      color: var(--text-color);
     }
     
     #themeToggle {
@@ -108,26 +236,6 @@
       font-size: 1.1em;
     }
     
-    .rank-badge {
-      display: inline-block;
-      padding: 0.25em 0.8em;
-      font-size: 0.9em;
-      font-weight: bold;
-      border-radius: 10px;
-    }
-    .miner-address-cell {
-      max-width: 400px;
-    }
-    .copy-btn {
-      background: none;
-      border: none;
-      color: #6c757d;
-      cursor: pointer;
-      padding: 0 5px;
-    }
-    .copy-btn:hover {
-      color: #0d6efd;
-    }
     .miner-links {
       display: inline-flex;
       gap: 5px;
@@ -288,7 +396,7 @@
         </div>
         
         <!-- Pagination Controls -->
-        <div class="d-flex justify-content-between align-items-center">
+        <div class="pagination-container d-flex justify-content-between align-items-center">
           <div class="btn-group">
             <button id="prevPageBtn" class="btn btn-outline-secondary" disabled>
               <i class="bi bi-chevron-left"></i> Previous
